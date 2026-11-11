@@ -1,0 +1,109 @@
+.paper-notes {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 28px 28px;
+}
+
+.paper-notes-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px 20px;
+  margin: 8px 0 19px;
+}
+
+.paper-notes-heading > div:first-child {
+  min-width: 0;
+}
+
+.paper-notes-heading h2 {
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.paper-notes-heading p {
+  color: #606d7f;
+  font-size: 12px;
+  line-height: 1.55;
+  margin-top: 5px;
+}
+
+.paper-notes-actions,
+.paper-notes-controls,
+.paper-notes-error,
+.note-origin {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.paper-notes-actions {
+  flex-wrap: wrap;
+}
+
+.paper-notes-controls .search-field {
+  flex: 1;
+  min-width: 0;
+  max-width: 360px;
+}
+
+.paper-notes-controls select {
+  min-height: 36px;
+}
+
+.paper-notes-count {
+  margin-top: 12px;
+  color: #606d7f;
+  font-size: 11px;
+}
+
+.paper-notes .note-card {
+  padding: 16px 0;
+}
+
+.paper-notes .note-meta,
+.paper-notes .note-location,
+.paper-notes .note-add-text,
+.paper-notes .note-alignment {
+  color: #606d7f;
+  font-size: 11px;
+}
+
+.paper-notes .note-location,
+.paper-notes .note-add-text {
+  color: var(--blue);
+}
+
+.paper-notes .note-quote,
+.paper-notes .note-translation,
+.paper-notes .note-body,
+.paper-notes .note-editor {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.note-translation > span {
+  display: block;
+  font-family: inherit;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.paper-notes .empty-state {
+  min-height: 200px;
+  padding: 30px 12px;
+}
+
+@media (max-width: 760px) {
+  .paper-notes {
+    padding: 6px 15px 22px;
+  }
+
+  .paper-notes-heading h2 {
+    font-size: 17px;
+  }
+}
