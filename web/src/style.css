@@ -144,12 +144,6 @@ img.brand-symbol{background:none;object-fit:contain}.quit-reader{margin-right:au
   position: absolute; z-index: 4; pointer-events: none; background: transparent; border: 0; border-radius: 2px; padding: 0;
 }
 .pdf-page .pdf-citation-target:focus-visible, .inline-citation:focus-visible { outline: 2px solid #4e7cb4; outline-offset: 2px; }
-.reader-right-panel .panel-tabs { gap: 2px; padding-inline: 7px; }
-.reader-right-panel .panel-tabs > button:not(.icon-button) { min-width: 31px; padding-inline: 3px; }
-.document-note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.document-note-entry .note-reference { margin-top: 10px; }
-.document-note-entry .note-reference p { font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
-.note-return { margin-top: 9px; }
 .pdf-holder.citation-hover .textLayer :is(span,br) { cursor: pointer; }
 .find-snippet { line-height: 1.55; overflow-wrap: anywhere; }
 .find-snippet mark, .article-view mark.find-highlight:not([role='button']) { background: #dce9fc; color: inherit; }

@@ -25,18 +25,6 @@ export function referenceLabel(entry:Pick<ReferenceEntry,'number'|'numbered'|'di
   return entry.display_label || (entry.numbered===false || entry.number<0 ? '未编号条目' : `[${entry.number}]`);
 }
 export type ReferenceIndex = {entries:ReferenceEntry[];heading:ReferenceAnchor|null};
-export type NoteReference = Pick<ReferenceEntry,'text'|'url'|'url_kind'|'library_match'|'library_match_method'>;
-export type DocumentNote = {
-  id:string;
-  kind:'footnote'|'endnote';
-  label:string;
-  anchor:ReferenceAnchor;
-  text:string;
-  fragments:ReferenceAnchor[];
-  references:NoteReference[];
-};
-export type DocumentNoteMarker = {note_id:string;anchor:ReferenceAnchor;evidence:'superscript'|'pdf_link'};
-export type DocumentNotesIndex = {entries:DocumentNote[];markers:DocumentNoteMarker[]};
 export type PublicationStatus = ''|'published'|'unpublished'|'internal';
 export type Paper = { id:string; filename:string; original_filename:string; metadata_status:'pending'|'queued'|'local'|'matched'|'review'|'offline'; metadata_source:string; title:string; authors:string; year:string; doi:string; abstract:string; source:string; item_type:string; publication_status:PublicationStatus; publication_date:string; publisher:string; last_read_at:number|null; has_attachment:boolean; language:string; status:'unread'|'reading'|'read'; starred:number; pages:number; parse_state:string; parse_error:string; parse_engine:string; tags:string[]; collections:string[]; annotations_count:number; translated_count:number; blocks_count:number; outline:{level:number;title:string;page:number}[]; locator:Locator; deleted_at:number|null; created:number; updated:number; ocr_pending_pages?:number; ocr_empty_pages?:number; ocr_pages?:number };
 export type Collection = {id:string;name:string;parent_id:string|null;count:number};

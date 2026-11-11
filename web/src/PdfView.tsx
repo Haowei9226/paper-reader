@@ -5,7 +5,6 @@ import 'pdfjs-dist/web/pdf_viewer.css';
 import type {PDFDocumentProxy,RenderTask} from 'pdfjs-dist';
 import type {Annotation,Counterpart,FindHit,PageData,Selection,Target} from './types';
 import {citationLabel,citationRanges,type CitationLinks} from './citations';
-import {noteLabel,noteRanges,type NoteLinks} from './noteLinks';
 import {Busy,ErrorLine} from './components';
 import {locateQuote,textSelection} from './selection';
 import {findRects,textRects} from './readerPosition';
@@ -36,20 +35,17 @@ function ocrTextItems(data:PageData, width:number, height:number) {
   }));
 }
 
-export default function PdfView({paperId,pageNumber,data,annotations,hit,preview,onLayout,onSelect,onAnnotation,citations,noteLinks}:{paperId:string;pageNumber:number;data:PageData|null;annotations:Annotation[];hit?:FindHit;preview?:Counterpart;onLayout:()=>void;onSelect:(s:Selection)=>void;onAnnotation:(a:Annotation)=>void;citations?:CitationLinks;noteLinks?:NoteLinks}){
+export default function PdfView({paperId,pageNumber,data,annotations,hit,preview,onLayout,onSelect,onAnnotation,citations}:{paperId:string;pageNumber:number;data:PageData|null;annotations:Annotation[];hit?:FindHit;preview?:Counterpart;onLayout:()=>void;onSelect:(s:Selection)=>void;onAnnotation:(a:Annotation)=>void;citations?:CitationLinks}){
   const holder=useRef<HTMLDivElement>(null),canvas=useRef<HTMLCanvasElement>(null),layer=useRef<HTMLDivElement>(null),ocrLayer=useRef<HTMLDivElement>(null);
   const [doc,setDoc]=useState<PDFDocumentProxy|null>(null),[width,setWidth]=useState(0),[dimensions,setDimensions]=useState({width:600,height:800,page:0}),[ready,setReady]=useState(false),[error,setError]=useState('');
   const [citationHover,setCitationHover]=useState(false);
   const laidOut = dimensions.page===pageNumber && Math.abs(dimensions.width-width)<.5;
   const ocrItems = useMemo(() => data?.ocr && laidOut ? ocrTextItems(data,dimensions.width,dimensions.height) : [],
     [data,laidOut,dimensions]);
-  const markers = useMemo(() => !data ? [] : data.blocks.flatMap(block => {
-    const notes=noteLinks?noteRanges(block,block.text,noteLinks):[];
-    return [
-      ...notes.map(range=>({...range,label:noteLabel(range.noteIds,noteLinks),open:()=>noteLinks?.open(range.noteIds)})),
-      ...(citations?citationRanges(block,block.text,citations,notes).map(range=>({...range,label:citationLabel(range.numbers,citations),open:()=>citations.open(range.numbers)})):[]),
-    ].map(marker=>({...marker,key:block.id+':'+marker.start,rects:textRects(block,marker.start,marker.end)})).filter(marker=>marker.rects.length);
-  }),[data,citations,noteLinks]);
+  const markers = useMemo(() => !data || !citations ? [] : data.blocks.flatMap(block =>
+    citationRanges(block,block.text,citations).map(citation => ({
+      ...citation,key:block.id + ':' + citation.start,rects:textRects(block,citation.start,citation.end),
+    })).filter(citation => citation.rects.length)),[data,citations]);
   useLayoutEffect(()=>{if(laidOut)onLayout()},[laidOut,dimensions,onLayout]);
   useEffect(()=>{const el=holder.current;if(!el)return;const observer=new ResizeObserver(entries=>setWidth(Math.max(180,Math.floor(entries[0].contentRect.width))));observer.observe(el);return()=>observer.disconnect()},[]);
   useEffect(()=>{setDoc(null);setError('');const task=pdfjs.getDocument({url:`/api/papers/${paperId}/file`,isEvalSupported:false,useSystemFonts:false,cMapUrl:'/pdf-assets/cmaps/',cMapPacked:true,standardFontDataUrl:'/pdf-assets/standard_fonts/'});let active=true;task.promise.then(d=>{if(active)setDoc(d)}).catch(()=>{if(active)setError('PDF 无法显示，请下载原始文件检查是否有密码或文件损坏')});return()=>{active=false;void task.destroy()}},[paperId]);
@@ -99,7 +95,7 @@ export default function PdfView({paperId,pageNumber,data,annotations,hit,preview
     const point=pdfPoint(e);
     if(!point)return;
     const marker=markerAt(point);
-    if(marker){marker.open();return}
+    if(marker && citations){citations.open(marker.numbers);return}
     const {x,y}=point;
     const ann=annotations.find(a=>a.targets.some(t=>t.page===pageNumber&&t.rects?.some(r=>x>=r[0]&&x<=r[2]&&y>=r[1]&&y<=r[3])));
     if(ann)onAnnotation(ann);
@@ -123,11 +119,11 @@ export default function PdfView({paperId,pageNumber,data,annotations,hit,preview
         {ocrItems.map(({blockId,start,end,text,style}) => <span key={`${blockId}:${start}`} style={style}
           data-text-block="" data-block-id={blockId} data-text-start={start} data-text-end={end}>{text}</span>)}
       </div>}
-      {ready&&laidOut&&data&&markers.map(marker => {
+      {ready&&laidOut&&data&&citations&&markers.map(marker => {
         const [x0,y0,x1,y1]=marker.rects[0];
-        return <button key={marker.key} type="button" role="link" className="pdf-citation-target" aria-label={marker.label}
+        return <button key={marker.key} type="button" role="link" className="pdf-citation-target" aria-label={citationLabel(marker.numbers,citations)}
           style={{left:`${x0/data.width*100}%`,top:`${y0/data.height*100}%`,width:`${(x1-x0)/data.width*100}%`,height:`${(y1-y0)/data.height*100}%`}}
-          onClick={event=>{event.stopPropagation();window.getSelection()?.removeAllRanges();marker.open()}}/>;
+          onClick={event=>{event.stopPropagation();window.getSelection()?.removeAllRanges();citations.open(marker.numbers)}}/>;
       })}
     </div>
     {!data&&ready&&<p className="small muted pdf-hint">正文解析完成后，即可在 PDF 上创建同步标注。</p>}

@@ -1,9 +1,7 @@
 import {Fragment, memo, useRef} from 'react';
 import {ChevronLeft, ChevronRight, Languages, Pencil} from 'lucide-react';
-import type {Annotation, Block, Counterpart, DocumentNote, FindHit, Notation, Paper, ReadingRole, ReadingSide, ReadingTable, Selection, TextAlias, TextBounds} from './types';
+import type {Annotation, Block, Counterpart, FindHit, Notation, Paper, ReadingRole, ReadingSide, ReadingTable, Selection, TextAlias, TextBounds} from './types';
 import {citationLabel,citationRanges,type CitationLinks} from './citations';
-import {noteLabel,noteRanges,type NoteLinks} from './noteLinks';
-import {noteBlockIds} from './documentNotes';
 import {textSelection} from './selection';
 import '../../reader/reading.css';
 
@@ -41,7 +39,7 @@ function styledNotation(block: Block, side: ReadingSide): Notation[] {
     .map(([start,end,kind]):Notation => [span.target_start + start - span.source_start, span.target_start + end - span.source_start, kind]));
 }
 
-function Highlighted({text, block, side, annotations, hit, preview, onAnnotation, bounds = [0,text.length], aliases, citations, noteLinks, joinsWord}: {
+function Highlighted({text, block, side, annotations, hit, preview, onAnnotation, bounds = [0,text.length], aliases, citations, joinsWord}: {
   text: string;
   block: Block;
   side: ReadingSide;
@@ -51,7 +49,6 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
   bounds?: TextBounds;
   aliases?: TextAlias[];
   citations?: CitationLinks;
-  noteLinks?: NoteLinks;
   joinsWord?: boolean;
   onAnnotation: (annotation: Annotation) => void;
 }) {
@@ -89,11 +86,8 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
   }
   const styles = styledNotation(block,side);
   endpoints.push(...bullets, ...styles.flatMap(([start,end]) => [start,end]));
-  const notes = noteLinks ? noteRanges(block,text,noteLinks) : [];
-  const linked = [
-    ...notes.map(range=>({...range,label:noteLabel(range.noteIds,noteLinks),open:()=>noteLinks?.open(range.noteIds),note:true})),
-    ...(citations ? citationRanges(block,text,citations,notes).map(range=>({...range,label:citationLabel(range.numbers,citations),open:()=>citations.open(range.numbers),note:false})) : []),
-  ].filter(range => bounds[0] <= range.start && range.end <= bounds[1]).sort((a,b)=>a.start-b.start);
+  const linked = citations ? citationRanges(block,text,citations)
+    .filter(range => bounds[0] <= range.start && range.end <= bounds[1]) : [];
   endpoints.push(...linked.flatMap(range => [range.start,range.end]));
   const points = [...new Set([...bounds, ...endpoints.filter(point => bounds[0] < point && point < bounds[1])])].sort((a, b) => a - b);
   const chunks = points.slice(0, -1).map((start, index) => {
@@ -128,20 +122,20 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
       onClick={insideCitation ? undefined : () => { if (!window.getSelection()?.toString().trim()) onAnnotation(range.annotation); }}
     >{slice}</mark>;
   });
-  if (!linked.length) return <>{chunks}</>;
+  if (!citations || !linked.length) return <>{chunks}</>;
   const nodes = [];
   let last = 0;
   for (const citation of linked) {
     const first = points.indexOf(citation.start);
     const end = points.indexOf(citation.end);
-    const label = citation.label;
-    nodes.push(...chunks.slice(last,first), <span className={'inline-citation'+(citation.note?' inline-note':'')} role="link" tabIndex={0}
+    const label = citationLabel(citation.numbers,citations);
+    nodes.push(...chunks.slice(last,first), <span className="inline-citation" role="link" tabIndex={0}
       key={'citation-' + citation.start} aria-label={label} title={label}
-      onClick={() => {if (!window.getSelection()?.toString().trim()) citation.open()}}
+      onClick={() => {if (!window.getSelection()?.toString().trim()) citations.open(citation.numbers)}}
       onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         window.getSelection()?.removeAllRanges();
-        citation.open();
+        citations.open(citation.numbers);
       }}}>
       {chunks.slice(first,end)}
     </span>);
@@ -150,7 +144,7 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
   return <>{nodes}{chunks.slice(last)}</>;
 }
 
-function TextBlock({block, side, language, annotations, onAnnotation, onEdit, flash, hit, preview, paired = false, inline = false, bounds, aliases, citations, noteLinks, joinsWord}: {
+function TextBlock({block, side, language, annotations, onAnnotation, onEdit, flash, hit, preview, paired = false, inline = false, bounds, aliases, citations, joinsWord}: {
   block: Block;
   side: ReadingSide;
   language: string;
@@ -165,7 +159,6 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
   bounds?: TextBounds;
   aliases?: TextAlias[];
   citations?: CitationLinks;
-  noteLinks?: NoteLinks;
   joinsWord?: boolean;
 }) {
   const role = roleOf(block);
@@ -217,7 +210,7 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
       data-translation-id={translation?.id}
     >
       <Highlighted text={text} block={block} side={side} annotations={annotations} hit={hit} preview={preview}
-        onAnnotation={onAnnotation} bounds={bounds} aliases={aliases} citations={citations} noteLinks={noteLinks} joinsWord={joinsWord}/>
+        onAnnotation={onAnnotation} bounds={bounds} aliases={aliases} citations={citations} joinsWord={joinsWord}/>
     </Tag>
     {translation && onEdit && !bounds && <button
       className="block-edit"
@@ -235,8 +228,6 @@ export type HtmlViewProps = {
   blocks: Block[];
   tables?: ReadingTable[];
   citations?: CitationLinks;
-  noteLinks?: NoteLinks;
-  documentNotes?: readonly DocumentNote[];
   side: ReadingSide;
   annotations: AnnotationIndex;
   onSelect: (selection: Selection) => void;
@@ -252,7 +243,7 @@ export type HtmlViewProps = {
   continuous?: boolean;
 };
 
-export default memo(function HtmlView({paper, page, blocks, tables = [], citations, noteLinks, documentNotes = [], side, annotations, onSelect, onAnnotation, onEdit, fontSize, flash, hit, preview, onTranslate, onPageChange, interleaved = false, continuous = false}: HtmlViewProps) {
+export default memo(function HtmlView({paper, page, blocks, tables = [], citations, side, annotations, onSelect, onAnnotation, onEdit, fontSize, flash, hit, preview, onTranslate, onPageChange, interleaved = false, continuous = false}: HtmlViewProps) {
   const root = useRef<HTMLElement>(null);
   const sourceLanguage = paper.language === 'zh' ? 'zh-CN' : 'en';
   const targetLanguage = sourceLanguage === 'en' ? 'zh-CN' : 'en';
@@ -261,9 +252,7 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
   const translatedTitle = titleBlocks.length > 0 && titleBlocks.every(block => block.translation?.text);
   const byId = new Map(blocks.map(block => [block.id,block]));
   const tableCaptions = new Set(tables.map(table => table.caption_id));
-  const noteIds = noteBlockIds(blocks,documentNotes);
-  const noteBlocks = blocks.filter(block=>noteIds.has(block.id));
-  const body = blocks.filter(block => !noteIds.has(block.id) && !['title', 'extra', 'image', 'caption', 'table', 'embedded'].includes(roleOf(block)) &&
+  const body = blocks.filter(block => !['title', 'extra', 'image', 'caption', 'table', 'embedded'].includes(roleOf(block)) &&
     (roleOf(block) !== 'formula' || block.equation));
   const figures = blocks.filter(block => (roleOf(block) === 'image' || roleOf(block) === 'caption') && !tableCaptions.has(block.id));
   const runs: Block[][] = [];
@@ -271,7 +260,7 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
     if (block.continues_previous && runs.length) runs[runs.length - 1].push(block);
     else runs.push([block]);
   }
-  const extras = blocks.filter(block => !noteIds.has(block.id) && roleOf(block) === 'extra' && (side === 'source' || block.translation?.text));
+  const extras = blocks.filter(block => roleOf(block) === 'extra' && (side === 'source' || block.translation?.text));
   const prose = body.filter(block => roleOf(block) !== 'formula');
   const total = prose.length;
   const translated = prose.filter(block => block.translation).length;
@@ -299,7 +288,6 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
       bounds={bounds}
       aliases={aliases}
       citations={citations}
-      noteLinks={noteLinks}
       joinsWord={joinsWord}
     />;
   }
@@ -430,13 +418,6 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
         {figures.map(block => <div key={block.id}>
           {renderBlock(block, side)}
           {interleaved && block.translation?.text && <div className="paired-translation" lang={targetLanguage}>{renderBlock(block, 'translation', true)}</div>}
-        </div>)}
-      </details>}
-      {noteBlocks.length > 0 && <details className="article-extras document-note-extras">
-        <summary>本页注释</summary>
-        {noteBlocks.map(block=><div key={block.id}>
-          {renderBlock(block,side==='translation'&&!block.translation?.text?'source':side)}
-          {interleaved&&block.translation?.text&&<div className="paired-translation" lang={targetLanguage}>{renderBlock(block,'translation',true)}</div>}
         </div>)}
       </details>}
       {extras.length > 0 && <details className="article-extras">
