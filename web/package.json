@@ -1,0 +1,9 @@
+{
+  "name": "paper-reader-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev": "node scripts/copy-pdf-assets.mjs && vite --host 127.0.0.1", "build": "node scripts/copy-pdf-assets.mjs && tsc -b && vite build", "typecheck": "tsc -b"},
+  "dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0", "lucide-react": "^0.468.0", "pdfjs-dist": "^4.10.38"},
+  "devDependencies": {"@types/react": "^19.0.0", "@types/react-dom": "^19.0.0", "@vitejs/plugin-react": "^4.3.4", "typescript": "^5.7.2", "vite": "^6.0.5"}
+}
