@@ -603,7 +603,6 @@ def export_pdf(store: Store, paper_id: str, destination: Path):
 
 def page_data(store: Store, paper, page_number: int, *, include_geometry: bool = True):
     from .layout import classify_page, describe_layout
-    from .reading import page_continuation
 
     paper_id = paper["id"]
     with store.connect() as db:
@@ -623,17 +622,6 @@ def page_data(store: Store, paper, page_number: int, *, include_geometry: bool =
             if b["translation"]:
                 b["translation"]["segments"] = json.loads(b["translation"]["segments"])
             blocks.append(b)
-        neighbors = {}
-        for number in (page_number - 1, page_number + 1):
-            meta = db.execute("SELECT width,height,ocr_job_id FROM pages WHERE paper_id=? AND number=?", (paper_id, number)).fetchone()
-            if not meta:
-                continue
-            items = []
-            for row in db.execute("SELECT * FROM blocks WHERE paper_id=? AND page=? ORDER BY position", (paper_id, number)):
-                item = dict(row)
-                item["bbox"] = json.loads(item["bbox"])
-                items.append(item)
-            neighbors[number] = (meta, items)
     result["ocr"] = attempted_ocr and any(block["text"].strip() for block in blocks)
     tables, table_by_block, equations_by_block = classify_page(
         store.original(paper_id), paper, page_number, result["height"], blocks, width=result["width"], ocr=result["ocr"])
@@ -642,19 +630,6 @@ def page_data(store: Store, paper, page_number: int, *, include_geometry: bool =
             if block["kind"] == "image" and fitz.Rect(block["bbox"]).get_area() >= result["width"] * result["height"] * .60:
                 block["reading_role"] = "embedded"
     result["tables"] = describe_layout(store, paper, page_number, blocks, tables, table_by_block, equations_by_block)
-    result["reading_continuation"] = {}
-    for number, (meta, items) in neighbors.items():
-        classify_page(store.original(paper_id), paper, number, meta["height"], items, width=meta["width"],
-                      ocr=bool(meta["ocr_job_id"]) and any(item["text"].strip() for item in items))
-        previous = number < page_number
-        joined = (page_continuation(items, blocks, meta["width"], result["width"]) if previous
-                  else page_continuation(blocks, items, result["width"], meta["width"]))
-        if joined:
-            current, other = (joined["right"], joined["left"]) if previous else (joined["left"], joined["right"])
-            current["continues_previous" if previous else "continues_next"] = True
-            result["reading_continuation"]["previous" if previous else "next"] = {
-                "block_id": other["id"], "page": number, "current_block_id": current["id"], "join_word": joined["join_word"],
-            }
     # Keep the character boxes server-side for HTML and use them only for the table mapping.
     for block in blocks:
         block["geometry"] = geometry(block["geometry"] if include_geometry else None)

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import base64
 import html
-import json
 import re
-import statistics
 from pathlib import Path
 
 from .metadata import identity
@@ -38,7 +36,6 @@ PAGE_NUMBER = re.compile(r"^[-–—]?\s*(?:page\s+)?\d{1,4}(?:\s*(?:/|of)\s*\d{
 FRONT_LABEL = re.compile(r"^(?:ccs concepts|(?:author )?keywords|key words|关键词|索引词)(?:\s*[:：].*)?$", re.I)
 RUNNING_HEADER = re.compile(r"\b[A-Z][A-Z0-9&-]{1,15}\s+[’'‘]\d{2},.+,\s*\w+")
 SOFT_WRAP = re.compile(r"\u00ad(?:[ \t\r\n]+(?=[^\W\d_]))?")
-LIST_START = re.compile(r"^\s*(?:[•◦●▪▫‣]|(?:\(?\d{1,3}|\(?[A-Za-z])[).、])\s+")
 
 
 def readable_text(text):
@@ -93,17 +90,8 @@ def _byline_indices(blocks, title_indices, authors):
     )
     if body_top is None:
         return set()
-    # ACM manuscripts may start their abstract directly, without an Abstract
-    # heading. A long prose line is not part of the author/affiliation band.
-    def prose(text):
-        words = re.findall(r"[A-Za-z]+", text)
-        return (len(words) >= 17 and sum(word[:1].islower() for word in words) >= len(words) * .75
-                or len(re.findall(r"[\u3400-\u9fff]", text)) >= 60)
-
-    prose_top = min((block["bbox"][1] for block in blocks
-                     if title_bottom - 2 <= block["bbox"][1] < body_top and prose(block["text"])), default=body_top)
     indices = {index for index, block in enumerate(blocks)
-               if title_bottom - 2 <= block["bbox"][1] < prose_top and block["bbox"][3] <= prose_top + 2
+               if title_bottom - 2 <= block["bbox"][1] < body_top and block["bbox"][3] <= body_top + 2
                and len(block["text"].strip()) < 280}
     credit = " ".join(blocks[index]["text"] for index in sorted(indices))
     names = [name for author in re.split("[;；]", authors) if (name := identity(author))]
@@ -117,69 +105,10 @@ def _wrapped_line(left, right):
     """Some PDFs expose each typeset line as a separate text block."""
     a, b = left["bbox"], right["bbox"]
     line = a[3] - a[1]
-    if LIST_START.match(right["text"]):
-        return False
-    indent = b[0] - a[0]
-    aligned = abs(indent) <= max(3, line * .35) or -1.5 * line <= indent < 0
-    if LIST_START.match(left["text"]):
-        aligned = aligned or 0 <= indent <= line * 1.5
     return (6 <= line <= 24 and .78 * line <= b[3] - b[1] <= 1.25 * line
-            and -.15 * line <= b[1] - a[3] <= .85 * line
-            and aligned
+            and -.15 * line <= b[1] - a[3] <= .46 * line
+            and abs(a[0] - b[0]) <= max(3, line * .23)
             and a[2] - a[0] >= max(75, (b[2] - b[0]) * .9))
-
-
-def _line_height(block):
-    data = block.get("geometry") or {}
-    if isinstance(data, str):
-        data = json.loads(data)
-    boxes = data.get("boxes", ())
-    heights = [box[3] - box[1] for box in boxes if box and box[3] > box[1]]
-    return statistics.median(heights) if heights else block["bbox"][3] - block["bbox"][1]
-
-
-def _starts_paragraph(left, right):
-    """Indentation and note/list typography beat a lowercase-word guess."""
-    if LIST_START.match(right["text"]):
-        return True
-    size, other = _line_height(left), _line_height(right)
-    if size and other and min(size, other) < max(size, other) * .76:
-        return True
-    return (not LIST_START.match(left["text"]) and right["bbox"][0] - left["bbox"][0] > max(4, size * .55)
-            and right["bbox"][1] >= left["bbox"][3] - 2)
-
-
-def page_continuation(left, right, left_width, right_width):
-    """Return a conservative cross-page prose bridge without changing anchors."""
-    flow = lambda blocks: [b for b in blocks if b["reading_role"] not in ("extra", "image", "caption", "embedded")]
-    before, after = flow(left), flow(right)
-    if not before or not after:
-        return None
-    a, b = before[-1], after[0]
-    if (a["reading_role"] != "text" or b["reading_role"] != "text"
-            or a["section"] != b["section"] or LIST_START.match(b["text"])):
-        return None
-    size, other = _line_height(a), _line_height(b)
-    if not size or not .85 <= other / size <= 1.18:
-        return None
-
-    def body_left(blocks, edge, width):
-        # Work within the endpoint's column. Mirrored odd/even margins are fine;
-        # an indented list/quotation must not become the normal body margin.
-        col = int((edge["bbox"][0] + edge["bbox"][2]) / 2 > width / 2)
-        aligned = [x for x in blocks if x["reading_role"] == "text" and len(x["text"]) > 60
-                   and int((x["bbox"][0] + x["bbox"][2]) / 2 > width / 2) == col
-                   and .85 <= _line_height(x) / size <= 1.18]
-        return min((x["bbox"][0] for x in aligned), default=edge["bbox"][0])
-
-    if any(abs(edge["bbox"][0] - body_left(blocks, edge, width)) > max(3, size * .45)
-           for blocks, edge, width in ((before, a, left_width), (after, b, right_width))):
-        return None
-    previous, following = readable_text(a["text"]).rstrip(), readable_text(b["text"]).lstrip()
-    if (len(previous) < 18 or not following or re.search(r"[.!?。！？:：;；][\s\"'”’）)\]」』]*$", previous)
-            or not re.match(r"[\w\u3400-\u9fff]", following)):
-        return None
-    return {"left": a, "right": b, "join_word": bool(re.search(r"[-\u00ad]\s*$", a["text"]) and following[:1].islower())}
 
 
 def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equation_blocks=(), table_captions=()):
@@ -197,7 +126,6 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
     front_label = None
     previous = None
     for index, block in enumerate(blocks):
-        block.pop("continues_previous", None)
         text = block["text"].strip()
         top, bottom = block["bbox"][1], block["bbox"][3]
         near_edge = height > 0 and (top < height * .075 or bottom > height * .93)
@@ -253,11 +181,9 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
             front_value = False
             front_label = None
             if role == "text" and previous and previous["reading_role"] == "text":
-                if not _starts_paragraph(previous, block) and (continues_sentence(previous["text"], block["text"]) or _wrapped_line(previous, block)):
+                if continues_sentence(previous["text"], block["text"]) or _wrapped_line(previous, block):
                     block["continues_previous"] = True
             previous = block
-        elif role in ("table", "embedded"):
-            previous = None
 
 
 def reading_runs(blocks):
