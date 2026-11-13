@@ -449,6 +449,11 @@ def create_app(root: Path = DATA, *, background=True, stop_server=None, frontend
 
         return paper_references(store, need_paper(paper_id))
 
+    @app.get("/api/papers/{paper_id}/notes")
+    def source_notes(paper_id: str):
+        from .notes import paper_notes
+        return paper_notes(store, need_paper(paper_id))
+
     @app.post("/api/papers/{paper_id}/counterpart")
     def counterpart(paper_id: str, body: dict):
         side = body.get("side")

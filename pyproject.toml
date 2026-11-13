@@ -1,6 +1,6 @@
 [project]
 name = "paper-reader"
-version = "0.6.14"
+version = "0.6.15"
 description = "A local bilingual literature library and reader"
 requires-python = ">=3.11"
 dynamic = ["dependencies"]

@@ -82,6 +82,10 @@
   margin: 0;
 }
 
+.article-view .reading-inline-heading { font-size: 1.16em; line-height: 1.4; }
+.article-view .reading-paragraph-break { user-select: none; }
+.article-view .figure-source-text { margin-top: 1em; }
+
 .article-view .source-break[hidden] {
   display: none;
 }
@@ -314,6 +318,10 @@
 
 .reading-export .export-page + .export-page {
   margin-top: 2.15em;
+}
+
+.reading-export .export-page.export-page-continuation {
+  margin-top: 0;
 }
 
 .reading-export .article-page-number {

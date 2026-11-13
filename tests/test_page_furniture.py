@@ -1,4 +1,5 @@
 import json
+import re
 
 import pymupdf as fitz
 
@@ -70,7 +71,7 @@ def test_legacy_furniture_and_sections_filter_without_changing_anchors(client, m
     body = next(row for row in original if row["page"] == 2 and "27 readers" in row["text"])
     assert body["section"] == "2 Anon."
     translation_id, _ = add_translation(client, pid, body)
-    footer = next(row for row in original if row["id"] in hidden and row["page"] == 2)
+    footer = next(row for row in original if row["id"] in hidden and row["page"] == 2 and json.loads(row["bbox"])[1] > 630)
     note = client.post(f"/api/papers/{pid}/annotations", json={
         "targets": [{"block_id": footer["id"], "start": 0, "end": 1}], "note": "Keep old PDF anchor",
     }).json()
@@ -114,10 +115,29 @@ def test_legacy_furniture_and_sections_filter_without_changing_anchors(client, m
         assert run_job(client, job["id"])["state"] == "done"
     assert len(calls) == 2
     rebuilt = run_job(client, queue_rebuild(client, pid))
-    assert rebuilt["state"] == "done" and rebuilt["result"]["preserved_pages"] == [2]
+    assert rebuilt["state"] == "done" and rebuilt["result"]["preserved_pages"] == []
+    assert rebuilt["result"]["retained_source_blocks"][footer["id"]] == "footer"
     assert client.get(f"/api/papers/{pid}/annotations").json()[0]["targets"] == note["targets"]
     assert client.get(f"/api/blocks/{body['id']}/translations").json()[0]["id"] == translation_id
-    assert next(row for row in stored_blocks(client, pid) if row["id"] == body["id"]) == body
+    rebuilt_body = next(row for row in stored_blocks(client, pid) if row["id"] == body["id"])
+    assert {key: value for key, value in rebuilt_body.items() if key != "position"} == {
+        key: value for key, value in body.items() if key != "position"}
+    assert rebuilt_body["position"] < body["position"]
+    retained = next(row for row in stored_blocks(client, pid) if row["id"] == footer["id"])
+    assert retained["kind"] == "legacy"
+    assert {key: value for key, value in retained.items() if key != "kind"} == {
+        key: value for key, value in footer.items() if key != "kind"}
+    exported = client.get(f"/api/papers/{pid}/export/html").text
+    folded = re.findall(r'<details class="article-extras legacy-sources">(.*?)</details>', exported, re.S)
+    assert any("block-" + footer["id"] in content for content in folded)
+    with client.store.connect() as db:
+        for scope in ({}, {"block_ids": [footer["id"], body["id"]]}):
+            blocks, *_ = translation_blocks(db, client.store.paper(pid, db), client.store.original(pid), scope)
+            assert footer["id"] not in {block["id"] for block in blocks}
+            assert body["id"] in {block["id"] for block in blocks}
+    repeated = client.store.create_job("translate", pid, {"block_ids": [footer["id"]]})
+    assert run_job(client, repeated["id"])["state"] == "done"
+    assert len(calls) == 2
 
 
 def test_numeric_table_rows_and_a_literal_paper_title_are_preserved():

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import re
+import statistics
 from pathlib import Path
 
 from .metadata import identity
 from .margins import is_running_section, page_margin_blocks
+from .frontmatter import frontmatter_elements, is_frontmatter_section
 
 SECTION = re.compile(
     r"^(?:(?:\d+(?:\.\d+)*[.、]?\s+|[一二三四五六七八九十]+[、.]\s*)?"
@@ -26,16 +29,18 @@ CAPTION = re.compile(
     r"(?:\s*[:：.)、–—-]|\s{2,}|\s*$)", re.I,
 )
 PUBLICATION = re.compile(
-    r"^(?:arxiv\s*:|copyright\b|©|provided proper attribution\b|all rights reserved\b|"
+    r"^(?:arxiv\s*:|copyright\s*(?:©|\d{4}|$)|©|provided proper attribution\b|all rights reserved\b|"
     r"this (?:work|article|paper) is (?:licensed|distributed|published) under\b|creative commons(?: attribution| license)\b|"
     r"acm (?:reference format|isbn)\b|"
     r"permission to (?:make|reproduce)\b|(?:https?://(?:dx\.)?doi\.org/|doi\s*:))",
     re.I,
 )
 PAGE_NUMBER = re.compile(r"^[-–—]?\s*(?:page\s+)?\d{1,4}(?:\s*(?:/|of)\s*\d{1,4})?\s*[-–—]?$", re.I)
-FRONT_LABEL = re.compile(r"^(?:ccs concepts|(?:author )?keywords|key words|关键词|索引词)(?:\s*[:：].*)?$", re.I)
+FRONT_LABEL = re.compile(r"^(?:ccs concepts|(?:author )?keywords|key words|index terms|additional key words and phrases|关键词|索引词)(?:\s*[:：—–-].*|\s*\n[\s\S]*)?$", re.I)
 RUNNING_HEADER = re.compile(r"\b[A-Z][A-Z0-9&-]{1,15}\s+[’'‘]\d{2},.+,\s*\w+")
 SOFT_WRAP = re.compile(r"\u00ad(?:[ \t\r\n]+(?=[^\W\d_]))?")
+LIST_START = re.compile(r"^\s*(?:[•◦●▪▫‣]|(?:\(?\d{1,3}|\(?[A-Za-z])[).、])\s+")
+NUMBERED_HEADING = re.compile(r"^(?:[IVX]{1,7}|[A-Z])\.\s*[^\W\d_]")
 
 
 def readable_text(text):
@@ -52,73 +57,102 @@ def continues_sentence(left, right):
                 and not re.match(r"^[ \u3000]{2,}|^\u3000", right))
 
 
-def _title_indices(blocks, paper, page, height):
-    if page != 1 or not (title := identity(paper["title"])):
-        return [], False
-    authors = [name for author in re.split("[;；]", paper["authors"]) if (name := identity(author))]
-    # A short last line of a centered title can fall into a body column.
-    # Match the title in page coordinates before trusting the reading order.
-    candidates = sorted((i for i, b in enumerate(blocks)
-                         if b["kind"] != "image" and b["bbox"][1] <= height * .35),
-                        key=lambda i: (blocks[i]["bbox"][1], blocks[i]["bbox"][0]))[:12]
-    for first in range(len(candidates)):
-        candidate = ""
-        for last in range(first, min(first + 4, len(candidates))):
-            block = blocks[candidates[last]]
-            if not (fragment := identity(block["text"])):
-                break
-            candidate += fragment
-            if candidate == title:
-                return candidates[first:last + 1], False
-            if candidate.startswith(title) and len(block["text"]) <= len(paper["title"]) + 400:
-                tail = candidate[len(title):]
-                if "abstract" not in tail and "摘要" not in tail and any(author in tail for author in authors):
-                    return candidates[first:last + 1], True
-            if not title.startswith(candidate):
-                break
-    return [], False
-
-
-def _byline_indices(blocks, title_indices, authors):
-    if not title_indices:
-        return set()
-    title_bottom = max(blocks[index]["bbox"][3] for index in title_indices)
-    body_top = min(
-        (block["bbox"][1] for block in blocks if block["bbox"][1] >= title_bottom - 2 and (
-            SECTION.fullmatch(block["text"].strip()) or re.match(r"^(?:abstract|摘\s*要)\s*[:：]", block["text"].strip(), re.I)
-        )), default=None,
-    )
-    if body_top is None:
-        return set()
-    indices = {index for index, block in enumerate(blocks)
-               if title_bottom - 2 <= block["bbox"][1] < body_top and block["bbox"][3] <= body_top + 2
-               and len(block["text"].strip()) < 280}
-    credit = " ".join(blocks[index]["text"] for index in sorted(indices))
-    names = [name for author in re.split("[;；]", authors) if (name := identity(author))]
-    normalized = identity(credit)
-    if any(name in normalized for name in names) or re.search(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", credit, re.I):
-        return indices
-    return set()
-
-
 def _wrapped_line(left, right):
     """Some PDFs expose each typeset line as a separate text block."""
     a, b = left["bbox"], right["bbox"]
     line = a[3] - a[1]
+    if LIST_START.match(right["text"]):
+        return False
+    indent = b[0] - a[0]
+    aligned = abs(indent) <= max(3, line * .35) or -1.5 * line <= indent < 0
+    if LIST_START.match(left["text"]):
+        aligned = aligned or 0 <= indent <= line * 1.5
     return (6 <= line <= 24 and .78 * line <= b[3] - b[1] <= 1.25 * line
-            and -.15 * line <= b[1] - a[3] <= .46 * line
-            and abs(a[0] - b[0]) <= max(3, line * .23)
+            and -.15 * line <= b[1] - a[3] <= .70 * line
+            and aligned
             and a[2] - a[0] >= max(75, (b[2] - b[0]) * .9))
 
 
-def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equation_blocks=(), table_captions=()):
+def _line_height(block):
+    data = block.get("geometry") or {}
+    if isinstance(data, bytes):
+        from .pdf import geometry
+        data = geometry(data)
+    if isinstance(data, str):
+        data = json.loads(data)
+    boxes = data.get("boxes", ())
+    heights = [box[3] - box[1] for box in boxes if box and box[3] > box[1]]
+    return statistics.median(heights) if heights else block["bbox"][3] - block["bbox"][1]
+
+
+def _starts_paragraph(left, right):
+    """Indentation and note/list typography beat a lowercase-word guess."""
+    if LIST_START.match(right["text"]):
+        return True
+    size, other = _line_height(left), _line_height(right)
+    if size and other and min(size, other) < max(size, other) * .76:
+        return True
+    return (not LIST_START.match(left["text"]) and right["bbox"][0] - left["bbox"][0] > max(4, size * .55)
+            and right["bbox"][1] >= left["bbox"][3] - 2)
+
+
+def page_continuation(left, right, left_width, right_width):
+    """Return a conservative cross-page prose bridge without changing anchors."""
+    flow = lambda blocks: [b for b in blocks if b["reading_role"] not in ("extra", "image", "caption", "embedded")]
+    before, after = flow(left), flow(right)
+    if not before or not after:
+        return None
+    a, b = before[-1], after[0]
+    if (a["reading_role"] != "text" or b["reading_role"] != "text"
+            or a["section"] != b["section"] or LIST_START.match(b["text"])):
+        return None
+    size, other = _line_height(a), _line_height(b)
+    if not size or not .85 <= other / size <= 1.18:
+        return None
+    for items, value in ((before, size), (after, other)):
+        sizes = [_line_height(item) for item in items if item["reading_role"] == "text" and len(item["text"]) > 30]
+        if sizes and value < statistics.median(sizes) * .85:
+            return None
+
+    def body_left(blocks, edge, width):
+        # Work within the endpoint's column. Mirrored odd/even margins are fine;
+        # an indented list/quotation must not become the normal body margin.
+        col = int((edge["bbox"][0] + edge["bbox"][2]) / 2 > width / 2)
+        aligned = [x for x in blocks if x["reading_role"] == "text" and len(x["text"]) > 30
+                   and int((x["bbox"][0] + x["bbox"][2]) / 2 > width / 2) == col
+                   and .85 <= _line_height(x) / size <= 1.18]
+        return min((x["bbox"][0] for x in aligned), default=edge["bbox"][0])
+
+    if any(abs(edge["bbox"][0] - body_left(blocks, edge, width)) > max(3, size * .45)
+           for blocks, edge, width in ((before, a, left_width), (after, b, right_width))):
+        return None
+    previous, following = readable_text(a["text"]).rstrip(), readable_text(b["text"]).lstrip()
+    if (len(previous) < 18 or not following or re.search(r"[.!?。！？:：;；][\s\"'”’）)\]」』]*$", previous)
+            or not re.match(r"[\w\u3400-\u9fff]", following)):
+        return None
+    return {"left": a, "right": b, "join_word": bool(re.search(r"[-\u00ad]\s*$", a["text"]) and following[:1].islower())}
+
+
+def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equation_blocks=(), table_captions=(),
+                            *, furniture=(), embedded_blocks=()):
     """Add display roles without changing the text or its annotation coordinates."""
-    hidden = page_margin_blocks(blocks, height, page, paper["title"])
+    for index, block in enumerate(blocks):
+        block.pop("reading_element", None)
+        if index in furniture:
+            block["reading_element"] = furniture[index]
+        if block.get("id") in embedded_blocks:
+            block["reading_role"] = "embedded"
+    hidden = {index for index in page_margin_blocks(blocks, height, page, paper["title"])
+              if blocks[index]["kind"] != "legacy"}
     blocks[:] = [block for index, block in enumerate(blocks) if index not in hidden]
     title = identity(paper["title"])
-    title_indices, mixed_byline = _title_indices(blocks, paper, page, height)
-    byline_indices = _byline_indices(blocks, title_indices, paper["authors"])
-    outline = [entry for entry in paper["outline"] if not is_running_section(entry["title"], paper["title"])]
+    frontmatter, title_indices, mixed_byline, clean_title = frontmatter_elements(blocks, paper, page, height)
+    noise_sections = {identity(block["text"]) for index, block in enumerate(blocks)
+                      if index in frontmatter or block.get("reading_element")}
+    outline = [entry for entry in paper["outline"]
+               if not (is_running_section(entry["title"], paper["title"])
+                       or identity(entry["title"]) in noise_sections
+                       or is_frontmatter_section(entry["title"], paper))]
     outline_levels = {identity(entry["title"]): entry["level"] for entry in outline if entry["page"] == page}
     section = next((entry["title"] for entry in reversed(outline) if entry["page"] < page), "")
 
@@ -126,11 +160,19 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
     front_label = None
     previous = None
     for index, block in enumerate(blocks):
+        block.pop("continues_previous", None)
         text = block["text"].strip()
         top, bottom = block["bbox"][1], block["bbox"][3]
         near_edge = height > 0 and (top < height * .075 or bottom > height * .93)
         if block["kind"] == "image":
             role = "image"
+        elif block["kind"] == "legacy":
+            role = "extra"
+            block["reading_element"] = "legacy_source"
+        elif block.get("id") in embedded_blocks:
+            role = "embedded"
+        elif block.get("reading_element"):
+            role = "extra"
         elif block.get("id") in table_blocks:
             role = "table"
         elif block.get("id") in equation_blocks:
@@ -141,29 +183,54 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
             # A title block can also contain the byline. Show the clean title in the
             # cover and keep the original block selectable in the publication details.
             role = "extra" if mixed_byline else "title"
+            block["reading_title"] = clean_title
+            block["reading_element"] = "title"
+        elif index in frontmatter:
+            role = "extra"
+            block["reading_element"] = frontmatter[index]
         elif near_edge and (PAGE_NUMBER.fullmatch(text) or (title and identity(text) == title)):
             role = "extra"
+            block["reading_element"] = "page_number" if PAGE_NUMBER.fullmatch(text) else "header"
         elif (page == 1 or near_edge or re.match(r"^(?:this (?:work|article|paper) is licensed under|acm (?:isbn|reference format))\b", text, re.I)) and PUBLICATION.match(text):
             role = "extra"
+            block["reading_element"] = "copyright" if re.search(r"copyright|©|licensed|permission|rights reserved", text, re.I) else "publication"
         elif page > 1 and top < height * .105 and len(text) < 160 and RUNNING_HEADER.search(text):
             role = "extra"
-        elif page == 1 and FRONT_LABEL.fullmatch(text):
+            block["reading_element"] = "header"
+        elif page in (1, 2) and FRONT_LABEL.fullmatch(text):
             role = "extra"
+            block["reading_element"] = "keywords"
             front_label = block
-            front_value = not re.search(r"[:：]\s*\S", text)
-        elif front_label and block["kind"] != "heading" and len(text) < 500 and (front_value or _wrapped_line(front_label, block)):
+            front_value = not re.search(r"[:：—–-]\s*\S|\n\s*\S", text)
+        elif (front_label and block["kind"] != "heading" and len(text) < 500
+              and (front_value and -3 <= top - front_label["bbox"][3] <= max(16, _line_height(front_label) * 1.5)
+                   and abs(block["bbox"][0] - front_label["bbox"][0]) <= max(6, _line_height(front_label))
+                   or _wrapped_line(front_label, block))):
             role = "extra"
+            block["reading_element"] = "keywords"
             front_label = block
             front_value = False
         elif page == 1 and top > height * .68 and (
             re.match(r"^[∗*†‡]\s*\w", text) or re.match(r"^\d+(?:st|nd|rd|th)\s+Conference\b", text, re.I)
         ):
             role = "extra"
+            block["reading_element"] = "footnote" if re.match(r"^[∗*†‡]", text) else "publication"
         elif (caption := CAPTION.match(text)) and not re.match(r"(?:shows?|illustrates?|summari[sz]es?|depicts?|presents?|lists?|reports?)\b", text[caption.end():].lstrip(), re.I):
             role = "caption"
-        elif index in byline_indices:
-            role = "extra"
-        elif SECTION.fullmatch(text) or REFERENCE_HEADING.fullmatch(text) or block["kind"] == "heading":
+        elif (mixed_heading := re.fullmatch(r"((?:[IVX]+[.]\s*)?(?:INTRODUCTION|BACKGROUND|METHODS|RESULTS|DISCUSSION))\s+([A-Z])", text)):
+            from .pdf import length
+            role = "text"
+            end = length(mixed_heading[1])
+            start = length(text[:mixed_heading.start(2)])
+            block["reading_heading"] = [0, end]
+            block["reading_breaks"] = [start]
+            block["section"] = mixed_heading[1]
+            section = mixed_heading[1]
+        elif (SECTION.fullmatch(text) or REFERENCE_HEADING.fullmatch(text) or block["kind"] == "heading"
+              or NUMBERED_HEADING.match(text) and len(text) < 150
+              and not REFERENCE_HEADING.fullmatch(block["section"])
+              and not re.search(r"[.!?。！？;；]\s*$|[,;]\s+", text)
+              and not re.match(r"^[A-Z]\.\s+(?:is|was|has|will|can|must|should)\b", text, re.I)):
             is_subheading = outline_levels.get(identity(text), 1) > 1 or re.match(r"^\d+\.\d+(?:\.\d+)*\s", text)
             role = "subheading" if is_subheading else "heading"
         elif REFERENCE_HEADING.fullmatch(block["section"]):
@@ -172,7 +239,8 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
             role = "text"
         if role in ("heading", "subheading"):
             section = text
-        if is_running_section(block["section"], paper["title"]):
+        if (is_running_section(block["section"], paper["title"])
+                or identity(block["section"]) in noise_sections or is_frontmatter_section(block["section"], paper)):
             block["section"] = section
         elif block["section"]:
             section = block["section"]
@@ -181,9 +249,13 @@ def classify_reading_blocks(blocks, paper, page, height, table_blocks=(), equati
             front_value = False
             front_label = None
             if role == "text" and previous and previous["reading_role"] == "text":
-                if continues_sentence(previous["text"], block["text"]) or _wrapped_line(previous, block):
+                if not _starts_paragraph(previous, block) and (continues_sentence(previous["text"], block["text"]) or _wrapped_line(previous, block)):
                     block["continues_previous"] = True
             previous = block
+        elif role in ("table", "embedded"):
+            previous = None
+    from .flow import refine_reading_flow
+    refine_reading_flow(blocks, height)
 
 
 def reading_runs(blocks):
@@ -239,8 +311,23 @@ def export_reading_html(store, paper):
         start, end = bounds or (0, length(text))
 
         def chunk(a, b):
-            value = escape(readable_text(slice_text(text, a, b))) if a < b else ""
-            return re.sub(r"\s+(?=[•◦●▪▫])", "<br>", value) if bounds else value
+            if a >= b:
+                return ""
+            breaks = set(block.get("reading_breaks", ())) if not translated else set()
+            heading = block.get("reading_heading") if not translated else None
+            points = sorted({a, b, *(point for point in breaks if a < point < b),
+                             *(point for point in (heading or ()) if a < point < b)})
+            pieces = []
+            for first, last in zip(points, points[1:]):
+                if first in breaks:
+                    pieces.append('<span class="reading-paragraph-break" aria-hidden="true"><br><br></span>')
+                value = escape(readable_text(slice_text(text, first, last)))
+                if bounds:
+                    value = re.sub(r"\s+(?=[•◦●▪▫])", "<br>", value)
+                if heading and heading[0] <= first < last <= heading[1]:
+                    value = f'<strong class="reading-inline-heading">{value}</strong>'
+                pieces.append(value)
+            return "".join(pieces)
 
         pieces, cursor = [], start
         for left, right, style in sorted(styles):
@@ -270,7 +357,8 @@ def export_reading_html(store, paper):
                 f'<div class="paired-translation" lang="{target_language}">'
                 f'<p class="block-text">{formatted(block, True)}</p></div>'
             )
-        return f'<div id="{anchor}" class="reading-block reading-{role}">{content}</div>'
+        element = f' data-reading-element="{escape(block["reading_element"])}"' if block.get("reading_element") else ""
+        return f'<div id="{anchor}" class="reading-block reading-{role}"{element}>{content}</div>'
 
     def render_table(table, blocks):
         caption = blocks.get(table["caption_id"])
@@ -311,11 +399,14 @@ def export_reading_html(store, paper):
         content.append(f'<details class="table-original"><summary>查看原表</summary>{original}</details></figure>')
         return "".join(content)
 
-    title_blocks = [b for b in (pages.get(1) or {}).get("blocks", []) if b["reading_role"] == "title"]
-    title_text = " ".join(f'<span id="block-{escape(b["id"])}">{escape(readable_text(b["text"]).strip())}</span>' for b in title_blocks) if title_blocks else escape(paper["title"])
+    title_page = next((data for data in pages.values() if any(b.get("reading_title") for b in data["blocks"])), pages.get(1) or {"blocks": []})
+    title_blocks = [b for b in title_page["blocks"] if b["reading_role"] == "title"]
+    clean_title = next((b["reading_title"] for b in title_page["blocks"] if b.get("reading_title")), paper["title"])
+    title_text = " ".join(f'<span id="block-{escape(b["id"])}">{escape(readable_text(b["text"]).strip())}</span>' for b in title_blocks) if title_blocks else escape(clean_title)
     title_translation = " ".join(b["translation"]["text"] for b in title_blocks) if title_blocks and all(b["translation"] for b in title_blocks) else ""
-    publication = " · ".join(part for part in (paper["source"], paper["year"]) if part)
-    authors = " · ".join(name.strip() for name in re.split("[;；]", paper["authors"]) if name.strip())
+    publication = " · ".join(part for part in (title_page.get("reading_source", paper["source"]), paper["year"]) if part)
+    source_authors = [readable_text(b["text"]).strip() for b in title_page["blocks"] if b.get("reading_element") == "author" and len(b["text"]) < 250]
+    authors = " · ".join(name.strip() for name in re.split("[;；]", paper["authors"]) if name.strip()) or " · ".join(source_authors)
     header = ['<header class="article-cover">']
     if publication:
         header.append(f'<p class="article-publication">{escape(publication)}</p>')
@@ -335,12 +426,29 @@ def export_reading_html(store, paper):
         contents.append("</ol></details></nav>")
 
     body = []
+    page_runs = {page: reading_runs(data["blocks"]) for page, data in pages.items()}
+    bridged_pages = set()
+    # A standalone article can put a confirmed cross-page sentence in one
+    # paragraph. Each source block and original page still has its own anchor.
+    owners = {}
+    for page, data in pages.items():
+        runs = page_runs[page]
+        link = data.get("reading_continuation", {}).get("previous")
+        before = owners.get(page - 1)
+        if (link and before and runs and before[-1]["id"] == link["block_id"]
+                and runs[0][0]["id"] == link["current_block_id"]):
+            before.extend(runs.pop(0))
+            bridged_pages.add(page)
+        owners[page] = runs[-1] if runs else before
     for page, data in pages.items():
         blocks = data["blocks"]
         tables = data["tables"]
-        body.append(f'<section id="page-{page}" class="export-page" aria-label="第 {page} 页">')
-        body.append(f'<p class="article-page-number">原文第 {page} 页</p>')
-        runs = reading_runs(blocks)
+        page_anchor = f' id="page-{page}"' if page not in bridged_pages else ""
+        page_class = "export-page export-page-continuation" if page in bridged_pages else "export-page"
+        body.append(f'<section{page_anchor} class="{page_class}" aria-label="第 {page} 页">')
+        if page not in bridged_pages:
+            body.append(f'<p class="article-page-number">原文第 {page} 页</p>')
+        runs = page_runs[page]
         flow = []
         for run in runs:
             if len(run) == 1:
@@ -350,6 +458,8 @@ def export_reading_html(store, paper):
             for index, block in enumerate(run):
                 if index and not (run[index - 1]["text"].rstrip().endswith(("-", "\u00ad")) and block["text"][:1].islower()):
                     content.append(" ")
+                if index and block["page"] != run[index - 1]["page"]:
+                    content.append(f'<span id="page-{block["page"]}" class="reading-page-anchor" aria-label="原文第 {block["page"]} 页"></span>')
                 content.append(f'<span id="block-{escape(block["id"])}">{formatted(block).strip()}</span>')
             content.append("</p>")
             for block in run:
@@ -364,8 +474,18 @@ def export_reading_html(store, paper):
         if figures:
             body.append('<details class="article-extras article-figures"' + (' open' if not runs else '') + '><summary>本页图表</summary>')
             body.extend(render_block(block) for block in figures)
+            labels = [b for b in blocks if b.get("reading_element") == "figure_text"]
+            if labels:
+                body.append('<details class="figure-source-text"><summary>图内文字</summary>')
+                body.extend(render_block(block) for block in labels)
+                body.append('</details>')
             body.append("</details>")
-        extras = [block for block in blocks if block["reading_role"] == "extra"]
+        legacy = [block for block in blocks if block["kind"] == "legacy"]
+        if legacy:
+            body.append('<details class="article-extras legacy-sources"><summary>保留的原文定位</summary>')
+            body.extend(render_block(block) for block in legacy)
+            body.append('</details>')
+        extras = [block for block in blocks if block["reading_role"] == "extra" and block["kind"] != "legacy"]
         if extras:
             body.append('<details class="article-extras"><summary>页边与出版信息</summary>')
             body.extend(render_block(block) for block in extras)

@@ -91,7 +91,7 @@ def source_with_offsets(raw):
 def translation_blocks(db, paper, path, scope):
     rows = db.execute("""SELECT b.id,b.page,b.kind,b.text,b.bbox,b.geometry,b.section,p.height,p.width,p.ocr_job_id!='' AS ocr
         FROM blocks b JOIN pages p ON p.paper_id=b.paper_id AND p.number=b.page
-        WHERE b.paper_id=? AND b.kind!='image' ORDER BY b.page,b.position""", (paper["id"],)).fetchall()
+        WHERE b.paper_id=? ORDER BY b.page,b.position""", (paper["id"],)).fetchall()
     blocks, table_by_block = [], {}
     explicit = set(scope.get("block_ids", []))
     adjacent = scope.get("neighbor_context") is True
@@ -106,7 +106,7 @@ def translation_blocks(db, paper, path, scope):
         _, matches, _ = classify_page(path, paper, page, items[0]["height"], items,
                                       width=items[0]["width"], detect=page in detected, ocr=bool(items[0]["ocr"]))
         table_by_block.update(matches)
-        blocks.extend(items)
+        blocks.extend(item for item in items if item["kind"] not in ("image", "legacy"))
     before, after = {}, {}
     for order, neighbors in ((blocks, before), (reversed(blocks), after)):
         previous = None
@@ -115,7 +115,7 @@ def translation_blocks(db, paper, path, scope):
                 neighbors[block["id"]] = previous
             if block["reading_role"] == "formula":
                 previous = None
-            elif block["reading_role"] not in ("caption", "extra", "table") and block["text"].strip():
+            elif block["reading_role"] not in ("caption", "extra", "table", "embedded") and block["text"].strip():
                 previous = block
     return blocks, before, after, table_by_block
 

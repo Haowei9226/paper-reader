@@ -1,8 +1,11 @@
 import {Fragment, memo, useRef} from 'react';
 import {ChevronLeft, ChevronRight, Languages, Pencil} from 'lucide-react';
-import type {Annotation, Block, Counterpart, FindHit, Notation, Paper, ReadingRole, ReadingSide, ReadingTable, Selection, TextAlias, TextBounds} from './types';
+import type {Annotation, Block, Counterpart, DocumentNote, FindHit, Notation, Paper, ReadingRole, ReadingSide, ReadingTable, Selection, TextAlias, TextBounds} from './types';
 import {citationLabel,citationRanges,type CitationLinks} from './citations';
+import {noteLabel,noteRanges,type NoteLinks} from './noteLinks';
+import {noteBlockIds} from './documentNotes';
 import {textSelection} from './selection';
+import {readingRuns,type ReadingContinuation} from './readingFlow';
 import '../../reader/reading.css';
 
 const softWrap = /\u00ad(?:[ \t\r\n]+(?=\p{L}))?/gu;
@@ -39,7 +42,7 @@ function styledNotation(block: Block, side: ReadingSide): Notation[] {
     .map(([start,end,kind]):Notation => [span.target_start + start - span.source_start, span.target_start + end - span.source_start, kind]));
 }
 
-function Highlighted({text, block, side, annotations, hit, preview, onAnnotation, bounds = [0,text.length], aliases, citations, joinsWord}: {
+function Highlighted({text, block, side, annotations, hit, preview, onAnnotation, bounds = [0,text.length], aliases, citations, noteLinks, joinsWord}: {
   text: string;
   block: Block;
   side: ReadingSide;
@@ -49,6 +52,7 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
   bounds?: TextBounds;
   aliases?: TextAlias[];
   citations?: CitationLinks;
+  noteLinks?: NoteLinks;
   joinsWord?: boolean;
   onAnnotation: (annotation: Annotation) => void;
 }) {
@@ -85,9 +89,14 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
     }
   }
   const styles = styledNotation(block,side);
-  endpoints.push(...bullets, ...styles.flatMap(([start,end]) => [start,end]));
-  const linked = citations ? citationRanges(block,text,citations)
-    .filter(range => bounds[0] <= range.start && range.end <= bounds[1]) : [];
+  const paragraphBreaks = new Set(side==='source' ? (block.reading_breaks??[]).filter(point=>Number.isInteger(point)&&bounds[0]<point&&point<bounds[1]) : []);
+  const heading = side==='source' ? block.reading_heading : undefined;
+  endpoints.push(...bullets, ...paragraphBreaks, ...(heading??[]), ...styles.flatMap(([start,end]) => [start,end]));
+  const notes = noteLinks ? noteRanges(block,text,noteLinks) : [];
+  const linked = [
+    ...notes.map(range=>({...range,label:noteLabel(range.noteIds,noteLinks),open:()=>noteLinks?.open(range.noteIds),note:true})),
+    ...(citations ? citationRanges(block,text,citations,notes).map(range=>({...range,label:citationLabel(range.numbers,citations),open:()=>citations.open(range.numbers),note:false})) : []),
+  ].filter(range => bounds[0] <= range.start && range.end <= bounds[1]).sort((a,b)=>a.start-b.start);
   endpoints.push(...linked.flatMap(range => [range.start,range.end]));
   const points = [...new Set([...bounds, ...endpoints.filter(point => bounds[0] < point && point < bounds[1])])].sort((a, b) => a - b);
   const chunks = points.slice(0, -1).map((start, index) => {
@@ -99,10 +108,11 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
       cursor = Math.min(end, b);
       return <Fragment key={a}>{before}<span hidden className="source-break">{hidden}</span></Fragment>;
     });
-    const value = <>{bullets.has(start) && <br/>}{content}{text.slice(cursor, end)}</>;
+    const value = <>{paragraphBreaks.has(start)&&<span className="reading-paragraph-break" data-paragraph-break="" aria-hidden="true"><br/><br/></span>}{bullets.has(start) && <br/>}{content}{text.slice(cursor, end)}</>;
     const style = styles.find(([a,b]) => a <= start && end <= b)?.[2];
-    const slice = style === 'sup' ? <sup>{value}</sup> : style === 'sub' ? <sub>{value}</sub>
+    const notation = style === 'sup' ? <sup>{value}</sup> : style === 'sub' ? <sub>{value}</sub>
       : style === 'math' ? <span className="math-inline">{value}</span> : value;
+    const slice = heading&&heading[0]<=start&&end<=heading[1] ? <strong className="reading-inline-heading">{notation}</strong> : notation;
     const range = ranges.find(candidate => candidate.start <= start && candidate.end >= end);
     const found = match && match.start <= start && match.end >= end;
     const previewed = temporary.some(candidate=>candidate.start<=start&&candidate.end>=end);
@@ -122,20 +132,20 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
       onClick={insideCitation ? undefined : () => { if (!window.getSelection()?.toString().trim()) onAnnotation(range.annotation); }}
     >{slice}</mark>;
   });
-  if (!citations || !linked.length) return <>{chunks}</>;
+  if (!linked.length) return <>{chunks}</>;
   const nodes = [];
   let last = 0;
   for (const citation of linked) {
     const first = points.indexOf(citation.start);
     const end = points.indexOf(citation.end);
-    const label = citationLabel(citation.numbers,citations);
-    nodes.push(...chunks.slice(last,first), <span className="inline-citation" role="link" tabIndex={0}
+    const label = citation.label;
+    nodes.push(...chunks.slice(last,first), <span className={'inline-citation'+(citation.note?' inline-note':'')} role="link" tabIndex={0}
       key={'citation-' + citation.start} aria-label={label} title={label}
-      onClick={() => {if (!window.getSelection()?.toString().trim()) citations.open(citation.numbers)}}
+      onClick={() => {if (!window.getSelection()?.toString().trim()) citation.open()}}
       onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         window.getSelection()?.removeAllRanges();
-        citations.open(citation.numbers);
+        citation.open();
       }}}>
       {chunks.slice(first,end)}
     </span>);
@@ -144,7 +154,7 @@ function Highlighted({text, block, side, annotations, hit, preview, onAnnotation
   return <>{nodes}{chunks.slice(last)}</>;
 }
 
-function TextBlock({block, side, language, annotations, onAnnotation, onEdit, flash, hit, preview, paired = false, inline = false, bounds, aliases, citations, joinsWord}: {
+function TextBlock({block, side, language, annotations, onAnnotation, onEdit, flash, hit, preview, paired = false, inline = false, bounds, aliases, citations, noteLinks, joinsWord}: {
   block: Block;
   side: ReadingSide;
   language: string;
@@ -159,13 +169,14 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
   bounds?: TextBounds;
   aliases?: TextAlias[];
   citations?: CitationLinks;
+  noteLinks?: NoteLinks;
   joinsWord?: boolean;
 }) {
   const role = roleOf(block);
   if (role === 'formula') {
     const equation = block.equation;
     if (!equation) return null;
-    return <figure className="reading-equation" data-block-anchor={block.id} data-reading-side={side}>
+    return <figure className="reading-equation" data-block-anchor={block.id} data-block-page={block.page} data-reading-side={side}>
       {equation.block_ids.slice(1).map(id => <span key={id} data-block-anchor={id} data-reading-side={side}/>)}
       <a href={`/api/papers/${block.paper_id}/file#page=${block.page}`} target="_blank" rel="noreferrer" title="在 PDF 中查看公式">
         <img src={'/api/assets/' + equation.asset} alt={equation.number ? `公式 (${equation.number})` : '原文公式'}
@@ -174,7 +185,7 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
     </figure>;
   }
   if (role === 'image') {
-    return <figure className="reading-figure" data-block-anchor={block.id} data-reading-side={side}>
+    return <figure className="reading-figure" data-block-anchor={block.id} data-block-page={block.page} data-reading-side={side}>
       <img src={'/api/assets/' + block.asset} alt={'第 ' + block.page + ' 页图表'} loading="lazy"
         width={Math.max(1, Math.round((block.bbox[2] - block.bbox[0]) * 1.3))}
         height={Math.max(1, Math.round((block.bbox[3] - block.bbox[1]) * 1.3))}/>
@@ -183,8 +194,10 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
   const translation = side === 'translation' ? block.translation : null;
   const text = side === 'translation' ? translation?.text : block.text;
   if (!text) {
-    const continuation = translation?.segments.some(span => span.target_block_id);
-    return <div className="translation-slot article-status" data-block-anchor={block.id} data-reading-side={side} aria-hidden={!continuation}>
+    const continuation = translation?.segments.find(span => span.target_block_id);
+    return <div className="translation-slot article-status" data-block-anchor={block.id} data-block-page={block.page}
+      data-reading-side={side} data-reading-owner={continuation?.target_block_id}
+      data-owner-start={continuation?.target_start} data-owner-end={continuation?.target_end} aria-hidden={!continuation}>
       {continuation ? '跨页句已接在前一页的译文中。' : undefined}
     </div>;
   }
@@ -194,6 +207,8 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
   const textClass = role === 'title' && !inline ? (paired ? 'article-title-translation' : 'article-title') : 'block-text';
   return <Wrapper
     data-block-anchor={block.id}
+    data-block-page={block.page}
+    data-reading-element={block.reading_element}
     data-reading-side={side}
     lang={language}
     className={'reading-block reading-' + role + (inline ? ' reading-fragment' : '') + (bounds ? ' table-text-part' : '') + (flash === block.id ? ' flash-block' : '')}
@@ -210,7 +225,7 @@ function TextBlock({block, side, language, annotations, onAnnotation, onEdit, fl
       data-translation-id={translation?.id}
     >
       <Highlighted text={text} block={block} side={side} annotations={annotations} hit={hit} preview={preview}
-        onAnnotation={onAnnotation} bounds={bounds} aliases={aliases} citations={citations} joinsWord={joinsWord}/>
+        onAnnotation={onAnnotation} bounds={bounds} aliases={aliases} citations={citations} noteLinks={noteLinks} joinsWord={joinsWord}/>
     </Tag>
     {translation && onEdit && !bounds && <button
       className="block-edit"
@@ -228,6 +243,9 @@ export type HtmlViewProps = {
   blocks: Block[];
   tables?: ReadingTable[];
   citations?: CitationLinks;
+  noteLinks?: NoteLinks;
+  documentNotes?: readonly DocumentNote[];
+  publicationSource?: string;
   side: ReadingSide;
   annotations: AnnotationIndex;
   onSelect: (selection: Selection) => void;
@@ -241,32 +259,40 @@ export type HtmlViewProps = {
   onPageChange?: (page: number) => void;
   interleaved?: boolean;
   continuous?: boolean;
+  continuation?: ReadingContinuation;
 };
 
-export default memo(function HtmlView({paper, page, blocks, tables = [], citations, side, annotations, onSelect, onAnnotation, onEdit, fontSize, flash, hit, preview, onTranslate, onPageChange, interleaved = false, continuous = false}: HtmlViewProps) {
+export default memo(function HtmlView({paper, page, blocks, tables = [], citations, noteLinks, documentNotes = [], publicationSource, side, annotations, onSelect, onAnnotation, onEdit, fontSize, flash, hit, preview, onTranslate, onPageChange, interleaved = false, continuous = false, continuation}: HtmlViewProps) {
   const root = useRef<HTMLElement>(null);
   const sourceLanguage = paper.language === 'zh' ? 'zh-CN' : 'en';
   const targetLanguage = sourceLanguage === 'en' ? 'zh-CN' : 'en';
   const titleBlocks = blocks.filter(block => roleOf(block) === 'title');
+  const cleanTitle = blocks.find(block=>block.reading_title)?.reading_title;
   const titleBlock = titleBlocks[0];
   const translatedTitle = titleBlocks.length > 0 && titleBlocks.every(block => block.translation?.text);
   const byId = new Map(blocks.map(block => [block.id,block]));
   const tableCaptions = new Set(tables.map(table => table.caption_id));
-  const body = blocks.filter(block => !['title', 'extra', 'image', 'caption', 'table', 'embedded'].includes(roleOf(block)) &&
+  const noteIds = noteBlockIds(blocks,documentNotes);
+  const noteBlocks = blocks.filter(block=>noteIds.has(block.id));
+  const ownedBody = blocks.filter(block => !noteIds.has(block.id) && !['title', 'extra', 'image', 'caption', 'table', 'embedded'].includes(roleOf(block)) &&
     (roleOf(block) !== 'formula' || block.equation));
+  const body = ownedBody.filter(block => !continuation?.hidden.has(block.id));
   const figures = blocks.filter(block => (roleOf(block) === 'image' || roleOf(block) === 'caption') && !tableCaptions.has(block.id));
-  const runs: Block[][] = [];
-  for (const block of body) {
-    if (block.continues_previous && runs.length) runs[runs.length - 1].push(block);
-    else runs.push([block]);
+  const figureText = blocks.filter(block=>block.reading_element==='figure_text');
+  const runs = readingRuns(body);
+  for (const run of runs) {
+    const extension = continuation?.extensions.get(run.at(-1)!.id);
+    if (extension) run.push(...extension);
   }
-  const extras = blocks.filter(block => roleOf(block) === 'extra' && (side === 'source' || block.translation?.text));
-  const prose = body.filter(block => roleOf(block) !== 'formula');
+  const legacy = blocks.filter(block=>block.kind==='legacy'&&!noteIds.has(block.id));
+  const extras = blocks.filter(block => block.kind!=='legacy' && !noteIds.has(block.id) && roleOf(block) === 'extra' && (side === 'source' || block.translation?.text));
+  const prose = ownedBody.filter(block => roleOf(block) !== 'formula');
   const total = prose.length;
   const translated = prose.filter(block => block.translation).length;
   const needsTranslation = side === 'translation' && !blocks.some(block => block.translation);
-  const publication = [paper.source, paper.year].filter(Boolean).join(' · ');
-  const authors = paper.authors.split(/[;；]/).map(name => name.trim()).filter(Boolean).join(' · ');
+  const publication = [publicationSource??paper.source, paper.year].filter(Boolean).join(' · ');
+  const sourceAuthors = blocks.filter(block=>block.reading_element==='author'&&block.text.length<250).map(block=>readableText(block.text).trim());
+  const authors = paper.authors.split(/[;；]/).map(name => name.trim()).filter(Boolean).join(' · ') || sourceAuthors.join(' · ');
 
   function renderBlock(block: Block, blockSide: ReadingSide, paired = false, inline = false, bounds?: TextBounds, aliases?: TextAlias[], joinsWord?: boolean) {
     const related = annotations.get(block.id) ?? noAnnotations;
@@ -288,6 +314,7 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
       bounds={bounds}
       aliases={aliases}
       citations={citations}
+      noteLinks={noteLinks}
       joinsWord={joinsWord}
     />;
   }
@@ -347,15 +374,22 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
   function renderRun(run: Block[], blockSide: ReadingSide, paired = false) {
     const words = run.map(block => blockSide === 'source' ? block.text : block.translation?.text ?? '');
     const language = blockSide === 'source' ? sourceLanguage : targetLanguage;
-    if (run.length === 1 || (blockSide === 'translation' && (words.some(word => !word) || words.slice(0, -1).some(word => /[.!?。！？][\s”’）)\]」』]*$/u.test(word))))) {
-      return <Fragment key={run[0].id}>{run.map(block => renderBlock(block, blockSide, paired))}</Fragment>;
+    function fragment(block:Block, index:number, inline = false, joinsWord = false) {
+      const content = renderBlock(block,blockSide,paired,inline,undefined,undefined,joinsWord);
+      if (!index || block.page === run[index - 1].page) return content;
+      const Boundary = inline ? 'span' : 'div';
+      return <Boundary data-page-start={block.page} data-reading-side={blockSide}>{content}</Boundary>;
+    }
+    if (run.length === 1 || (blockSide === 'translation' && words.some(word => !word))) {
+      return <Fragment key={run[0].id}>{run.map((block,index) => <Fragment key={block.id}>{fragment(block,index)}</Fragment>)}</Fragment>;
     }
     const wordWraps = words.map((word,index) => blockSide === 'source'
-      && /[-\u00ad]\s*$/u.test(word) && /^\p{Ll}/u.test(words[index+1] ?? ''));
+      && (run[index + 1]?.page !== run[index].page ? !!continuation?.joinWords.has(run[index].id)
+        : /[-\u00ad]\s*$/u.test(word) && /^\p{Ll}/u.test(words[index+1] ?? '')));
     return <p className="reading-block reading-joined" lang={language} key={run[0].id}>
       {run.map((block, index) => <Fragment key={block.id}>
         {index > 0 && !wordWraps[index-1] && !language.startsWith('zh') && !/\s$/u.test(words[index-1]) && !/^\s/u.test(words[index]) ? ' ' : ''}
-        {renderBlock(block, blockSide, paired, true, undefined, undefined, wordWraps[index])}
+        {fragment(block,index,true,wordWraps[index])}
       </Fragment>)}
     </p>;
   }
@@ -393,17 +427,17 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
       if (selection) onSelect(selection);
     }, 0)}
   >
-    {continuous && page > 1 && <div className="article-page-number continuous-page-label">第 {page} 页</div>}
+    {continuous && page > 1 && !continuation?.hidden.size && <div className="article-page-number continuous-page-label">第 {page} 页</div>}
     {needsTranslation && !continuous && !tables.length && !body.some(block => block.equation) ? <div className="translation-empty">
       <Languages size={24}/>
       <h3>这一页还没有译文</h3>
       <button className="button primary" onClick={() => onTranslate(page)}>翻译当前页</button>
     </div> : <>
-      {page === 1 && <header className="article-cover" lang={sourceLanguage}>
+      {(page === 1||cleanTitle) && <header className="article-cover" lang={sourceLanguage}>
         {publication && <p className="article-publication">{publication}</p>}
         {titleBlock && (side === 'source' || translatedTitle)
           ? renderTitle(side)
-          : <h2 className="article-title" data-block-anchor={continuous ? titleBlock?.id : undefined} data-reading-side={side}>{paper.title}</h2>}
+          : <h2 className="article-title" data-block-anchor={continuous ? titleBlock?.id : undefined} data-reading-side={side}>{cleanTitle??paper.title}</h2>}
         {interleaved && translatedTitle && renderTitle('translation', true)}
         {authors && <p className="article-authors">{authors}</p>}
       </header>}
@@ -411,13 +445,30 @@ export default memo(function HtmlView({paper, page, blocks, tables = [], citatio
         {needsTranslation ? '本页还没有译文' : `本页正文已译 ${translated} / ${total} 段`}
         <button className="text-button" onClick={() => onTranslate(page)}>{continuous ? '翻译这一页' : '翻译当前页'}</button>
       </p>}
-      {!flow.length && <p className="reading-block">这一页暂无可重排的正文。</p>}
+      {!flow.length && !continuation?.hidden.size && <p className="reading-block">这一页暂无可重排的正文。</p>}
       {flow.map(item => item.content)}
-      {figures.length > 0 && <details className="article-extras article-figures" open={!body.length ? true : undefined}>
+      {figures.length > 0 && <details className="article-extras article-figures" open={!ownedBody.length ? true : undefined}>
         <summary>本页图表 · {Math.max(figures.filter(block => block.kind === 'image').length, figures.filter(block => roleOf(block) === 'caption').length)}</summary>
         {figures.map(block => <div key={block.id}>
           {renderBlock(block, side)}
           {interleaved && block.translation?.text && <div className="paired-translation" lang={targetLanguage}>{renderBlock(block, 'translation', true)}</div>}
+        </div>)}
+        {!!figureText.length&&<details className="figure-source-text"><summary>图内文字</summary>
+          {figureText.map(block=>renderBlock(block,side==='translation'&&!block.translation?.text?'source':side))}
+        </details>}
+      </details>}
+      {noteBlocks.length > 0 && <details className="article-extras document-note-extras">
+        <summary>本页注释</summary>
+        {noteBlocks.map(block=><div key={block.id}>
+          {renderBlock(block,side==='translation'&&!block.translation?.text?'source':side)}
+          {interleaved&&block.translation?.text&&<div className="paired-translation" lang={targetLanguage}>{renderBlock(block,'translation',true)}</div>}
+        </div>)}
+      </details>}
+      {legacy.length > 0 && <details className="article-extras legacy-sources">
+        <summary>保留的原文定位</summary>
+        {legacy.map(block=><div key={block.id}>
+          {renderBlock(block,side==='translation'&&!block.translation?.text?'source':side)}
+          {interleaved&&block.translation?.text&&<div className="paired-translation" lang={targetLanguage}>{renderBlock(block,'translation',true)}</div>}
         </div>)}
       </details>}
       {extras.length > 0 && <details className="article-extras">

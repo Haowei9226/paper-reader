@@ -7,7 +7,7 @@
 <p>Original PDF and reflowable text · Chinese–English reading · Source-linked notes · Per-paper AI</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.6.14-2563eb?style=flat-square" alt="Version 0.6.14" />
+  <img src="https://img.shields.io/badge/version-0.6.15-2563eb?style=flat-square" alt="Version 0.6.15" />
   <img src="https://img.shields.io/badge/data-local-0f766e?style=flat-square" alt="Local data" />
   <img src="https://img.shields.io/badge/Windows-x64-0078d4?style=flat-square" alt="Windows x64" />
   <img src="https://img.shields.io/badge/macOS-Apple%20%26%20Intel-555555?style=flat-square" alt="macOS Apple Silicon and Intel" />
@@ -31,6 +31,17 @@ Menus and settings are currently primarily Chinese, with no English-interface sw
 
 > **Platform status:** The Windows x64 executable has been exercised on a real Windows system. The Mac archive contains Apple Silicon and Intel runtimes; its archive, dependencies, and execution permissions have been checked, but **it has not been run on a real Mac**. It is unsigned and not notarized. Scanned-page OCR currently requires Windows.
 
+<a id="whats-new"></a>
+## What's new in 0.6.15
+
+- **Follow source footnotes and endnotes.** Confirmed PDF superscripts, internal links, and note positions connect body markers to the Notes sidebar, with jumps to the original note and back to the reading position. Repeated page-local numbers remain separate; uncertain relationships remain unresolved.
+- **Read more continuous text.** Column, spacing, indentation, and typography evidence restore paragraphs and lists and join confirmed cross-page continuations, while retaining original page locations and source anchors.
+- **Repair characters using PDF evidence.** Reliable glyph and geometry mappings can recover ligatures, accents, and omitted word spaces while preserving mathematical characters and literal hyphens.
+- **Protect reading work during HTML rebuilds.** Confirmed mappings migrate translation, annotation, and citation anchors while preserving translation versions and reading locations. Body pages without a safe mapping retain their previous version and are reported in the task result. Previously referenced headers, footers, and short figure labels keep separate retained-source anchors.
+- **Separate article credits and page furniture more clearly.** Title, author and affiliation, abstract, publication sidebar, review line number, and repeated header/footer handling reduces interruptions to body text.
+
+Create a local backup before upgrading. To apply the new extraction and layout handling to an existing paper, open it and choose **重新转换 HTML** (Rebuild HTML), then check the result against the PDF. Complex layouts and content without reliable glyph mappings can still require manual review.
+
 <a id="download"></a>
 ## Download
 
@@ -38,9 +49,9 @@ Visit the [Releases page](https://github.com/Haowei9226/paper-reader/releases/la
 
 | Download | Best for | Contents |
 | --- | --- | --- |
-| [Complete sharing bundle · Windows + Mac](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Share-0.6.14.zip) | First-time use or sharing with colleagues | Both platform archives, instructions, application source, third-party source, and licenses; about 306 MB |
-| [Windows x64 package](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Windows-0.6.14.zip) | Windows users | Extract, then run `文献阅读器.exe` |
-| [Mac package · both architectures](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-macOS-0.6.14.zip) | Apple Silicon or Intel Mac users | Extract, then open `文献阅读器.app`; see the verification limits above |
+| [Complete sharing bundle · Windows + Mac](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Share-0.6.15.zip) | First-time use or sharing with colleagues | Both platform archives, instructions, application source, third-party source, and licenses; see the release page for size |
+| [Windows x64 package](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Windows-0.6.15.zip) | Windows users | Extract, then run `文献阅读器.exe` |
+| [Mac package · both architectures](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-macOS-0.6.15.zip) | Apple Silicon or Intel Mac users | Extract, then open `文献阅读器.app`; see the verification limits above |
 
 The complete bundle contains platform ZIPs that must be extracted a second time. Application source and third-party license materials are included in that bundle and are available through this repository and its release page. Preserve them when redistributing the software.
 
@@ -48,6 +59,7 @@ The complete bundle contains platform ZIPs that must be extracted a second time.
 <summary><strong>Contents</strong></summary>
 
 - [Installation and launch](#quick-start)
+- [What's new in 0.6.15](#whats-new)
 - [Preview](#preview)
 - [Features](#features)
 - [A reading workflow](#workflow)
@@ -117,6 +129,7 @@ Papers, notes, and settings live in a separate data directory. Normal shutdown, 
 | **Link notes to evidence** | View the same annotation across PDF, HTML, and translation; jump from a note to its source; correct cross-language phrase alignments |
 | **Continue translation work** | Background tasks, progress, and resume; repair missing passages; preserve manual edits, translation versions, and per-paper terminology |
 | **Follow references** | Locate reference entries from citations; open uniquely matched library papers, then return through the citation chain |
+| **Follow source notes** | Open confirmed footnotes and endnotes from body markers, jump to the original note, return to the body, and follow recognized references |
 | **Ask about one paper** | Structured summaries, selected-passage explanations, and questions; separate conversation history per paper; jump from answer citations to supplied source passages |
 | **Handle scans** | Windows system OCR for pages without extractable text; recognized text and geometry stay in the local library, while the original PDF remains unchanged |
 | **Export your work** | Annotated PDFs, standalone bilingual HTML, Markdown notes, and CSV / BibTeX / RIS bibliography exports |
@@ -125,15 +138,19 @@ Papers, notes, and settings live in a separate data directory. Normal shutdown, 
 <details>
 <summary><strong>More about reading, translation, and annotations</strong></summary>
 
-**Reading and navigation.** The HTML view loads nearby pages as needed and supports continuous scrolling. In-paper search locates matches in original text and existing translations. Outlines, notes, and source-linked AI citations can return to their corresponding passages. PDF / HTML mode and within-page position are saved.
+**Reading and navigation.** The HTML view loads nearby pages as needed and supports continuous scrolling. Text split into individual PDF lines is joined into paragraphs using columns, line spacing, and indentation; confirmed paragraphs also continue across page boundaries. Original text and annotation anchors are retained. In-paper search locates matches in original text and existing translations. Outlines, notes, and source-linked AI citations can return to their corresponding passages. PDF / HTML mode and within-page position are saved.
 
-**Complex content.** Recognized tables can be read and translated by row and cell, with access to the original table. Standalone equations and some graphics retain PDF snapshots. The reader attempts to remove review line numbers and repeated page furniture. Rebuilding HTML protects existing source anchors used by notes and translations.
+**Complex content.** Geometry and typography distinguish titles, author columns, affiliations, abstracts, copyright, publication sidebars, printed page numbers, and repeated headers and footers. Column continuations, hanging lists, and paragraphs inside one PDF text block are reflowed using layout evidence. Figure labels remain available with the original image and can be expanded or found. Recognized tables support row and cell reading and translation; standalone equations and some graphics retain PDF snapshots. Explicit font evidence can recover ligatures, accents, and omitted word spaces while preserving mathematical Unicode and literal hyphens.
+
+**Conversion limits.** Font and spacing repairs require Rebuild HTML. Source anchors for translations, annotations, and citations migrate using the physical positions of the same PDF glyphs; translated content, version history, and saved reading locations remain intact. Previously referenced headers, footers, and short figure labels remain in a separate retained-source disclosure, allowing the rest of their page to update. They are excluded from further translation and AI reading. Body pages without a provably safe mapping retain their previous version, and the task result reports their count. Missing glyph mappings, complex overlapping layouts, and scans without text cannot be guaranteed to recover automatically. The original PDF remains available; on Windows, scans can use local OCR.
 
 **Translation jobs.** Pause a task or quit and resume later. Batches reuse known terminology for the paper. Sentences split across page boundaries are combined when detected. Retranslation and manual edits create versions; affected alignments are flagged for review. Automatic phrase alignment is a model suggestion that you can correct.
 
 **Bibliographic metadata.** Query Crossref / DataCite using a DOI, arXiv identifier, or title, and generate attachment names from author, year, and title. Manual fields and filenames are preserved. Unpublished manuscripts and internal materials skip automatic lookups; explicitly choosing the single-paper lookup still performs a public search. Automatic lookup is disabled by default in shared builds.
 
 **Citation chains.** Reference matching first uses DOI, then attempts a unique match using full title, first author, and year. After opening a matched library paper, Return to citation restores the previous reading position. External references offer browser links or search entry points.
+
+**Footnotes and endnotes.** Confirmed PDF superscripts, internal links, and note positions connect source markers to the Notes sidebar. From there, jump to the original note, return to the body reading position, or open a recognized reference in the library or browser. Repeated page-local numbers remain separate. Uncertain superscripts and abbreviated references are left unresolved. Complete recognized note blocks appear in a collapsible section in HTML while retaining their source anchors.
 
 </details>
 
@@ -377,7 +394,7 @@ Rebuilding requires a built frontend, a clean packaging environment, and the mat
 <a id="license"></a>
 ## License and contributions
 
-This version of the PaperReader application is provided under **GNU AGPL v3**; see [LICENSE](LICENSE). PyMuPDF / MuPDF and other third-party software retain their own licenses and notices. The [complete sharing bundle](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Share-0.6.14.zip) includes application source, corresponding PDF-engine source, and license materials.
+This version of the PaperReader application is provided under **GNU AGPL v3**; see [LICENSE](LICENSE). PyMuPDF / MuPDF and other third-party software retain their own licenses and notices. The [complete sharing bundle](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Share-0.6.15.zip) includes application source, corresponding PDF-engine source, and license materials.
 
 Use [Issues](https://github.com/Haowei9226/paper-reader/issues) for reproducible bugs or feature suggestions. Include the operating-system version, application version, steps, and redacted error details. Do not upload API keys, private papers, an entire database, or unreviewed logs. A minimal synthetic PDF that you can share publicly is often useful for reproducing layout problems.
 

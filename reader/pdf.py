@@ -8,16 +8,17 @@ import re
 import statistics
 import tempfile
 import threading
-import unicodedata
 import zlib
 from collections import defaultdict
 from itertools import groupby
+from functools import lru_cache
 from pathlib import Path
 
 import pymupdf as fitz
 
 from .store import NO_TEXT_ERROR, OCR_PAGE_QUERY, Store, dumps, now
 from .margins import line_number_rows, page_furniture_rows, page_margin_blocks
+from .pdf_text import canonical_glyph, explicit_ligature, recover_overprinted_accents, word_gap_starts
 
 PDF_LAYOUT_LOCK = threading.RLock()
 COLORS = {"yellow": (1, .81, .28), "green": (.42, .78, .58), "blue": (.42, .66, .96), "pink": (.95, .49, .64)}
@@ -31,48 +32,90 @@ def scalar_text(text: str) -> str:
 
 
 def recover_pdf_glyphs(page, blocks):
-    """Repair broken ToUnicode entries using the painted glyph in the embedded font."""
+    """Repair text only when the trace or embedded painted glyph identifies it."""
     def font_key(font):
         return re.sub(r"[\s-]+", "", font.split("+", 1)[-1]).casefold()
 
     def glyph_key(font, origin):
         return font, tuple(round(value, 3) for value in origin)
 
-    broken = defaultdict(list)
+    raw_chars = defaultdict(list)
+    raw_following = {}
     for block in blocks:
         for line in block.get("lines", ()):
+            line_chars = [(char, font_key(span["font"])) for span in line["spans"] for char in span["chars"]]
+            for index, (char, _) in enumerate(line_chars):
+                raw_following[id(char)] = line_chars[index + 1:index + 4]
             for span in line["spans"]:
-                font = None
                 for char in span["chars"]:
-                    if not SURROGATE.search(char["c"]):
-                        continue
                     char["c"] = scalar_text(char["c"])
-                    if char["c"] == "\ufffd":
-                        font = font or font_key(span["font"])
-                        broken[glyph_key(font, char["origin"])].append(char)
-    if not broken:
+                    if not char["c"]:
+                        continue
+                    raw_chars[glyph_key(font_key(span["font"]), char["origin"])].append(char)
+    if not raw_chars:
         return
 
     def valid(code):
-        return 0 < code <= 0x10ffff and not 0xd800 <= code <= 0xdfff and code != 0xfffd
+        return 32 <= code <= 0x10ffff and not 0xd800 <= code <= 0xdfff and code not in (0x7f, 0xfffd)
 
     try:
         trace = page.get_texttrace()
         font_refs = defaultdict(set)
-        needed = {font for font, _ in broken}
+        needed = {font for font, _ in raw_chars}
         for xref, _, _, name, *_ in page.get_fonts():
             name = font_key(name)
             if name in needed:
                 font_refs[name].add(xref)
     except (ValueError, RuntimeError, AttributeError):
+        recover_overprinted_accents(blocks)
         return
 
     mupdf = getattr(fitz, "mupdf", None)
     get_name = getattr(mupdf, "fz_get_glyph_name2", None)
     get_code = getattr(mupdf, "fz_unicode_from_glyph_name", None)
     fonts, names = {}, {}
+    trace_tails = defaultdict(set)
+    unpainted_separators = set()
+    for span in trace:
+        font = font_key(span["font"])
+        owner, suffix = None, []
+        for code, glyph, origin, trace_box in span["chars"]:
+            if glyph >= 0 or owner is None or glyph_key(font, origin) != owner:
+                if owner and suffix:
+                    trace_tails[owner].add("".join(suffix))
+                owner, suffix = (glyph_key(font, origin) if glyph >= 0 else None), []
+            elif valid(code) or code in (9, 10, 13):
+                suffix.append(chr(code))
+            if glyph < 0 and code in (9, 10, 13) and abs(trace_box[2] - trace_box[0]) <= .03:
+                for char in raw_chars.get(glyph_key(font, origin), ()):
+                    if char["c"] == chr(code) and abs(char["bbox"][2] - char["bbox"][0]) <= .03:
+                        unpainted_separators.add(id(char))
+        if owner and suffix:
+            trace_tails[owner].add("".join(suffix))
 
-    def embedded_code(xref, glyph):
+    def expansion_tail(char, key, font):
+        suffixes = trace_tails.get(key, set())
+        if len(suffixes) != 1:
+            return []
+        suffix, tail = next(iter(suffixes)), []
+        for following, following_font in raw_following[id(char)]:
+            if following_font != font or abs(following["origin"][0] - char["bbox"][2]) > .03 or abs(following["origin"][1] - char["origin"][1]) > .03:
+                break
+            tail.append(following)
+            text = "".join(c["c"] for c in tail)
+            if text == suffix:
+                return tail
+            if not suffix.startswith(text):
+                break
+        return []
+
+    for key in trace_tails:
+        for char in raw_chars.get(key, ()):
+            for following in expansion_tail(char, key, key[0]):
+                if following["c"] in ("\t", "\n", "\r") and abs(following["bbox"][2] - following["bbox"][0]) <= .03:
+                    unpainted_separators.add(id(following))
+
+    def embedded_text(xref, glyph):
         key = (xref, glyph)
         if key not in names:
             names[key] = None
@@ -82,32 +125,66 @@ def recover_pdf_glyphs(page, blocks):
                     if font_data := page.parent.extract_font(xref)[3]:
                         fonts[xref] = fitz.Font(fontbuffer=font_data)
                 if font := fonts[xref]:
-                    code = get_code(get_name(font.this, glyph))
-                    if valid(code):
-                        names[key] = code
+                    name = get_name(font.this, glyph)
+                    if letters := explicit_ligature(name):
+                        names[key] = letters
+                    else:
+                        code = get_code(name)
+                        if valid(code):
+                            names[key] = canonical_glyph(chr(code))
             except (ValueError, RuntimeError, AttributeError, TypeError, IndexError):
                 pass
         return names[key]
 
     recovered = defaultdict(set)
+    consumed = {}
     for span in trace:
         font = font_key(span["font"])
         if font not in needed:
             continue
-        for code, glyph, origin, _ in span["chars"]:
+        for code, glyph, origin, trace_box in span["chars"]:
             key = glyph_key(font, origin)
-            if key not in broken:
+            if key not in raw_chars:
                 continue
-            if valid(code):
-                recovered[key].add(code)
-            elif get_name and get_code and glyph > 0:
-                candidates = {embedded_code(ref, glyph) for ref in font_refs[key[0]]}
-                if candidates and None not in candidates:
-                    recovered[key].update(candidates)
-    for key, candidates in recovered.items():
-        if len(candidates) == 1:
-            for char in broken[key]:
-                char["c"] = chr(next(iter(candidates)))
+            candidates = set()
+            if get_name and get_code and glyph > 0:
+                candidates = {embedded_text(ref, glyph) for ref in font_refs[font]}
+                if None in candidates:
+                    candidates = set()
+            for char in raw_chars[key]:
+                # Overprinted glyphs can share an origin (a control-code space
+                # and the following G, for example); their advances distinguish
+                # them. Refuse an ambiguous same-origin replacement.
+                if abs((char["bbox"][2] - char["bbox"][0]) - (trace_box[2] - trace_box[0])) > .03:
+                    continue
+                text = char["c"]
+                broken = not text or any(ord(ch) < 32 or ord(ch) == 0x7f or ch == "\ufffd" for ch in text)
+                if broken:
+                    if candidates:
+                        recovered[id(char)].update(candidates)
+                    elif valid(code):
+                        recovered[id(char)].add(chr(code))
+                elif len(candidates) == 1:
+                    letters = next(iter(candidates))
+                    # A valid but truncated ToUnicode value (f for f_i, Q for
+                    # Q_u) must have an explicit multi-letter glyph name.
+                    if len(letters) > 1 and text == letters[0]:
+                        suffixes = trace_tails.get(key, set())
+                        tail = expansion_tail(char, key, font)
+                        if not suffixes or tail and text + "".join(c["c"] for c in tail) == letters:
+                            recovered[id(char)].add(letters)
+                            if tail:
+                                consumed[id(char)] = tail
+    for chars in raw_chars.values():
+        for char in chars:
+            candidates = recovered[id(char)]
+            if len(candidates) == 1:
+                char["c"] = next(iter(candidates))
+                for following in consumed.get(id(char), ()):
+                    following["c"] = ""
+            elif id(char) not in unpainted_separators:
+                char["c"] = re.sub(r"[\x00-\x1f\x7f]", "\ufffd", char["c"])
+    recover_overprinted_accents(blocks)
 
 
 def length(text: str) -> int:
@@ -142,7 +219,7 @@ def rects_for_range(block, start: int, end: int):
 
 
 def _append(parts, boxes, rows, text, box, line):
-    for ch in unicodedata.normalize("NFKC", scalar_text(text)):
+    for ch in canonical_glyph(scalar_text(text)):
         parts.append(ch)
         count = length(ch)
         boxes.extend([box] * count)
@@ -159,16 +236,12 @@ def extract_block(raw, page, *, span_styles=None):
         if not line_text:
             continue
         if parts:
-            if last.endswith("-") and line_text[0].islower():
+            if last.endswith(("-", "\u00ad")) and line_text[0].islower():
                 while parts and parts[-1].isspace():
                     removed = parts.pop()
                     for _ in range(length(removed)):
                         boxes.pop()
                         rows.pop()
-                if parts and parts[-1] == "-":
-                    parts.pop()
-                    boxes.pop()
-                    rows.pop()
                 if styles and styles[-1][1] > len(boxes):
                     start, _, style = styles.pop()
                     if start < len(boxes):
@@ -176,10 +249,13 @@ def extract_block(raw, page, *, span_styles=None):
             elif not (re.search(r"[\u3400-\u9fff]$", last) and re.match(r"[\u3400-\u9fff]", line_text)):
                 _append(parts, boxes, rows, " ", None, row)
         style_by_span = span_styles(line["spans"]) if span_styles else {}
+        gap_starts = word_gap_starts(line)
         for span in line["spans"]:
             sizes.append(span["size"])
             start = len(boxes)
             for char in span.get("chars", []):
+                if id(char) in gap_starts:
+                    _append(parts, boxes, rows, " ", None, row)
                 box = fitz.Rect(char["bbox"]) * page.rotation_matrix
                 _append(parts, boxes, rows, char["c"], [round(v, 3) for v in box], row)
             if len(boxes) > start and id(span) in style_by_span:
@@ -373,17 +449,21 @@ def _pdf_outline(doc):
     return [{"level": level, "title": scalar_text(title), "page": page} for level, title, page in doc.get_toc() if page > 0]
 
 
-def _heading_outline(db, paper_id):
-    title = db.execute("SELECT title FROM papers WHERE id=?", (paper_id,)).fetchone()[0]
-    rows = db.execute("""SELECT b.id,b.text,b.kind,b.bbox,b.geometry,b.page,p.height
+def _heading_outline(db, paper_id, path=None):
+    from .layout import classify_page
+
+    paper = dict(db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone())
+    paper["outline"] = []
+    rows = db.execute("""SELECT b.*,p.height,p.width,p.ocr_job_id
         FROM blocks b JOIN pages p ON p.paper_id=b.paper_id AND p.number=b.page
         WHERE b.paper_id=? ORDER BY b.page,b.position""", (paper_id,))
     result = []
     for number, group in groupby(rows, key=lambda row: row["page"]):
         blocks = [{**row, "bbox": json.loads(row["bbox"])} for row in group]
-        hidden = page_margin_blocks(blocks, blocks[0]["height"], number, title)
+        classify_page(path, paper, number, blocks[0]["height"], blocks, width=blocks[0]["width"],
+                      detect=False, ocr=bool(blocks[0]["ocr_job_id"]))
         result.extend({"level": 1, "title": block["text"], "page": number}
-                      for index, block in enumerate(blocks) if block["kind"] == "heading" and index not in hidden)
+                      for block in blocks if block["reading_role"] in ("heading", "subheading"))
     return result[:300]
 
 
@@ -425,7 +505,7 @@ def parse_pdf(store: Store, job_id: str, paper_id: str):
         sample = " ".join(r[0] for r in db.execute("""SELECT text FROM blocks
             WHERE paper_id=? AND kind!='image' AND TRIM(text)!='' ORDER BY page,position LIMIT 12""", (paper_id,)))
         language = "zh" if len(re.findall(r"[\u3400-\u9fff]", sample)) > len(sample) * .15 else "en"
-        toc = toc or _heading_outline(db, paper_id)
+        toc = toc or _heading_outline(db, paper_id, file)
         p = store.paper(paper_id, db)
         manual = set(json.loads(p.get("manual_fields", "[]")))
         state = "ready" if sample.strip() else "no_text"
@@ -462,29 +542,78 @@ def _referenced_blocks(db, paper):
     return sorted(blocks)
 
 
+def prepare_rebuilt_sources(db, store, paper, new_blocks, page_meta, total, initial_preserved=()):
+    """Plan staged source/anchor publication without writing or committing.
+
+    Dry runs and publication use this same retention and page fallback policy.
+    The caller supplies initial missing-text/OCR pages and owns publication.
+    """
+    from .anchor_migration import plan_anchor_migration
+    from .rebuild_legacy import retain_legacy_blocks
+
+    paper_id = paper["id"]
+    kept = set(initial_preserved)
+    old_blocks = [dict(row) for row in db.execute("SELECT * FROM blocks WHERE paper_id=?", (paper_id,))]
+    new_blocks = [dict(row) for row in new_blocks]
+    for block in new_blocks:
+        block["_source_pdf"] = store.original(paper_id)
+    details = dict(paper)
+    if isinstance(details.get("outline"), str):
+        details["outline"] = json.loads(details["outline"])
+    references = dict(paper)
+    if isinstance(references.get("locator"), dict):
+        references["locator"] = dumps(references["locator"])
+    new_ids = {block["id"] for block in new_blocks}
+    missing_refs = set(_referenced_blocks(db, references)) - new_ids
+    new_blocks, legacy = retain_legacy_blocks(store.original(paper_id), details, old_blocks, new_blocks, page_meta, missing_refs)
+    for _ in range(total + 3):
+        migration = plan_anchor_migration(db, paper_id, new_blocks, old_blocks=old_blocks, preserved_pages=kept)
+        if migration.safe:
+            break
+        adjusted, retained = retain_legacy_blocks(store.original(paper_id), details, old_blocks, new_blocks, page_meta,
+                                                  migration.unsafe_blocks - legacy.keys())
+        if set(retained) - set(legacy):
+            new_blocks = adjusted
+            legacy.update(retained)
+            continue
+        additional = migration.unsafe_pages - kept
+        if not additional:
+            raise ValueError("原文定位无法安全迁移，已保留原阅读版")
+        kept.update(additional)
+    else:
+        raise ValueError("原文定位无法安全迁移，已保留原阅读版")
+    return new_blocks, migration, sorted(kept), legacy
+
+
 def _publish_rebuilt_html(db, store, job_id, paper_id, total, toc):
+    from .anchor_migration import apply_anchor_migration
+
     db.execute("BEGIN IMMEDIATE")
     job = db.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
     if not job or job[0] != "running":
         raise InterruptedError("任务已暂停或取消")
-    paper = db.execute("SELECT id,deleted_at,pages,locator FROM papers WHERE id=?", (paper_id,)).fetchone()
+    paper = db.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
     if not paper or paper["deleted_at"] is not None:
         raise ValueError("文献已移入回收站，原阅读版仍可在恢复后使用。")
     if paper["pages"] and paper["pages"] != total:
         raise ValueError("原 PDF 的页数发生了变化，已保留原阅读版。")
 
-    # Keep the whole page when a saved range no longer fits the new extraction.
-    # An exact block ID and text match lets existing UTF-16 offsets stay valid.
-    kept = sorted(row[0] for row in db.execute(f"""
-        SELECT old.page FROM blocks old LEFT JOIN rebuilt_blocks new ON new.id=old.id
-        WHERE old.paper_id=? AND old.id IN (SELECT value FROM json_each(?))
-        AND (new.id IS NULL OR new.page<>old.page OR new.text<>old.text OR (old.kind='image' AND new.bbox<>old.bbox))
-        UNION
+    # Native text can improve without invalidating existing translated content.
+    # Migrate only source ranges justified by the same physical PDF glyphs.
+    kept = {row[0] for row in db.execute(f"""
         SELECT old.page FROM blocks old WHERE old.paper_id=? AND old.text<>''
         AND NOT EXISTS (SELECT 1 FROM rebuilt_blocks new WHERE new.page=old.page AND new.text<>'')
         UNION
         SELECT number FROM ({OCR_PAGE_QUERY}) WHERE ocr_job_id<>'' AND has_text
-    """, (paper_id, dumps(_referenced_blocks(db, paper)), paper_id, paper_id)))
+    """, (paper_id, paper_id))}
+    new_blocks = [dict(row) for row in db.execute("SELECT * FROM rebuilt_blocks ORDER BY page,position")]
+    page_meta = [dict(row) for row in db.execute("SELECT * FROM pages WHERE paper_id=?", (paper_id,))]
+    new_blocks, migration, kept, legacy = prepare_rebuilt_sources(db, store, paper, new_blocks, page_meta, total, kept)
+    # All reference JSON and source blocks publish in this same transaction.
+    apply_anchor_migration(db, migration)
+    db.executemany("INSERT OR REPLACE INTO rebuilt_blocks VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (tuple(block[key] for key in ("id", "paper_id", "page", "position", "kind", "text", "bbox", "geometry", "asset", "section"))
+                    for block in (dict(block) for block in new_blocks)))
     if kept:
         for table, column in (("rebuilt_pages", "number"), ("rebuilt_blocks", "page")):
             db.execute(f"DELETE FROM {table} WHERE {column} IN (SELECT value FROM json_each(?))", (dumps(kept),))
@@ -510,18 +639,26 @@ def _publish_rebuilt_html(db, store, job_id, paper_id, total, toc):
                   AND number IN (SELECT page FROM rebuilt_blocks WHERE text<>'')""", (paper_id,))
     for block_id in changed:
         store.reindex_block(db, block_id)
+    if any(update.table == "annotations" for update in migration.updates):
+        store.reindex_paper(db, paper_id)
 
     has_text = db.execute("SELECT 1 FROM blocks WHERE paper_id=? AND text<>'' LIMIT 1", (paper_id,)).fetchone()
     state = "ready" if has_text else "no_text"
     error = "" if has_text else NO_TEXT_ERROR
     result = {"pages": total, "converted_pages": total - len(kept), "preserved_pages": kept, "state": state}
+    migrated = defaultdict(int)
+    for update in migration.updates:
+        migrated[update.table] += 1
+    result["migrated_source_records"] = dict(migrated)
+    result["retained_source_blocks"] = {block["id"]: legacy[block["id"]] for block in new_blocks
+                                        if block["id"] in legacy and block["page"] not in kept}
     if kept:
         message = f"已更新 {result['converted_pages']} 页，保留 {len(kept)} 页的原阅读版"
     else:
         message = "HTML 已重新转换" if has_text else "已重新读取 PDF，未发现可提取的正文"
     stamp = now()
     db.execute("UPDATE papers SET pages=?,parse_state=?,parse_error=?,outline=?,updated=? WHERE id=?",
-               (total, state, error, dumps(toc or _heading_outline(db, paper_id)), stamp, paper_id))
+               (total, state, error, dumps(toc or _heading_outline(db, paper_id, store.original(paper_id))), stamp, paper_id))
     # Publish the pages and completion together so a late cancel cannot mark
     # already published work as cancelled.
     db.execute("UPDATE jobs SET state='done',progress=?,total=?,message=?,result=?,updated=? WHERE id=?",
@@ -601,8 +738,34 @@ def export_pdf(store: Store, paper_id: str, destination: Path):
     doc.close()
 
 
+@lru_cache(maxsize=64)
+def _printed_source(path, mtime, size, source):
+    from .metadata import visible_publication_source
+    try:
+        with PDF_LAYOUT_LOCK, fitz.open(path) as doc:
+            return visible_publication_source(doc, source)
+    except (OSError, ValueError, RuntimeError):
+        return ""
+
+
+def reading_source(store, paper):
+    from .metadata import BROKEN_METADATA
+    source = paper.get("source", "")
+    manual = paper.get("manual_fields", "[]")
+    manual = json.loads(manual) if isinstance(manual, str) else manual
+    if "source" in manual or not BROKEN_METADATA.search(source):
+        return source
+    path = store.original(paper["id"])
+    try:
+        info = path.stat()
+        return _printed_source(str(path.resolve()), info.st_mtime_ns, info.st_size, source) or source
+    except OSError:
+        return source
+
+
 def page_data(store: Store, paper, page_number: int, *, include_geometry: bool = True):
     from .layout import classify_page, describe_layout
+    from .reading import page_continuation
 
     paper_id = paper["id"]
     with store.connect() as db:
@@ -622,6 +785,17 @@ def page_data(store: Store, paper, page_number: int, *, include_geometry: bool =
             if b["translation"]:
                 b["translation"]["segments"] = json.loads(b["translation"]["segments"])
             blocks.append(b)
+        neighbors = {}
+        for number in (page_number - 1, page_number + 1):
+            meta = db.execute("SELECT width,height,ocr_job_id FROM pages WHERE paper_id=? AND number=?", (paper_id, number)).fetchone()
+            if not meta:
+                continue
+            items = []
+            for row in db.execute("SELECT * FROM blocks WHERE paper_id=? AND page=? ORDER BY position", (paper_id, number)):
+                item = dict(row)
+                item["bbox"] = json.loads(item["bbox"])
+                items.append(item)
+            neighbors[number] = (meta, items)
     result["ocr"] = attempted_ocr and any(block["text"].strip() for block in blocks)
     tables, table_by_block, equations_by_block = classify_page(
         store.original(paper_id), paper, page_number, result["height"], blocks, width=result["width"], ocr=result["ocr"])
@@ -630,8 +804,23 @@ def page_data(store: Store, paper, page_number: int, *, include_geometry: bool =
             if block["kind"] == "image" and fitz.Rect(block["bbox"]).get_area() >= result["width"] * result["height"] * .60:
                 block["reading_role"] = "embedded"
     result["tables"] = describe_layout(store, paper, page_number, blocks, tables, table_by_block, equations_by_block)
+    result["reading_continuation"] = {}
+    for number, (meta, items) in neighbors.items():
+        classify_page(store.original(paper_id), paper, number, meta["height"], items, width=meta["width"],
+                      ocr=bool(meta["ocr_job_id"]) and any(item["text"].strip() for item in items))
+        previous = number < page_number
+        joined = (page_continuation(items, blocks, meta["width"], result["width"]) if previous
+                  else page_continuation(blocks, items, result["width"], meta["width"]))
+        if joined:
+            current, other = (joined["right"], joined["left"]) if previous else (joined["left"], joined["right"])
+            current["continues_previous" if previous else "continues_next"] = True
+            result["reading_continuation"]["previous" if previous else "next"] = {
+                "block_id": other["id"], "page": number, "current_block_id": current["id"], "join_word": joined["join_word"],
+            }
     # Keep the character boxes server-side for HTML and use them only for the table mapping.
     for block in blocks:
         block["geometry"] = geometry(block["geometry"] if include_geometry else None)
     result["blocks"] = blocks
+    if page_number in (1, 2) and (source := reading_source(store, paper)) != paper.get("source", ""):
+        result["reading_source"] = source
     return result

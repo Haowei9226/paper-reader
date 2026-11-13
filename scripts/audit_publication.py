@@ -19,12 +19,13 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "output" / "github-publication"
-VERSION = "0.6.14"
+VERSION = re.search(r'^VERSION = "([^"]+)"', (ROOT / "reader" / "__init__.py").read_text(encoding="utf-8"), re.M).group(1)
 COMBINED_NAME = f"PaperReader-Share-{VERSION}.zip"
-TRUSTED_COMBINED_SHA256 = "fd8363ec782b0d5942b910d396869510deb291194336d3e7230b6774a2898497"
+TRUSTED_COMBINED_SHA256 = ("fd8363ec782b0d5942b910d396869510deb291194336d3e7230b6774a2898497"
+                           if VERSION == "0.6.14" else None)
 TRUSTED_PLATFORM_SHA256 = {
-    f"PaperReader-Windows-{VERSION}.zip": "840ff8bd39b6e30e7299ad5094c831262840911ce9ebec91370dbd4a8a8e72d2",
-    f"PaperReader-macOS-{VERSION}.zip": "1bb41f104615fd8426b888631c69acb485365f29814a63210f67248189d6c83c",
+    "PaperReader-Windows-0.6.14.zip": "840ff8bd39b6e30e7299ad5094c831262840911ce9ebec91370dbd4a8a8e72d2",
+    "PaperReader-macOS-0.6.14.zip": "1bb41f104615fd8426b888631c69acb485365f29814a63210f67248189d6c83c",
 }
 FIXED_FILES = (
     ".gitignore", ".gitattributes", "LICENSE", "README.md", "README.en.md", "README_EN.md",
@@ -120,6 +121,8 @@ def private_inputs():
 
 def prepare_assets():
     """Recover the original small platform ZIPs, leaving the changed ZIP alone."""
+    if VERSION != "0.6.14":
+        raise ValueError("New release assets need a fresh verify_release.py audit. Use --source-only to freeze reviewed source; old asset approvals cannot be reused.")
     source = ROOT / "output" / "releases" / COMBINED_NAME
     if sha256_file(source) != TRUSTED_COMBINED_SHA256:
         raise ValueError("The original audited combined release archive has changed; re-audit before publication")

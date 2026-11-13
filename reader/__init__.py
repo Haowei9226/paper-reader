@@ -17,4 +17,4 @@ def default_data_dir():
 
 
 DATA = Path(os.environ.get("READER_DATA_DIR") or default_data_dir()).resolve()
-VERSION = "0.6.14"
+VERSION = "0.6.15"

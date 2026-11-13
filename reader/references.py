@@ -10,6 +10,7 @@ from urllib.parse import quote, urlsplit
 from .metadata import NAME_PARTICLES, doi_name, first_author, identity, valid_title, year_of
 from .pdf import geometry, length
 from .reading import REFERENCE_HEADING, classify_reading_blocks, readable_text
+from .margins import document_furniture, page_margin_elements
 
 
 REFERENCE_NUMBER = r"[0-9０-９]{1,4}|[〇零一二三四五六七八九十百千]{1,8}"
@@ -289,16 +290,17 @@ def _anchor(block, start, label):
     return {"block_id": block["id"], "page": block["page"], "start": start, "end": start + length(label), "quote": label}
 
 
-def _entries(db, paper, heading):
+def _entries(db, paper, heading, path=None):
     rows = db.execute("""SELECT b.id,b.page,b.position,b.kind,b.text,b.section,b.bbox,b.geometry,p.height
         FROM blocks b JOIN pages p ON p.paper_id=b.paper_id AND p.number=b.page
-        WHERE b.paper_id=? AND b.kind!='image' AND (b.page>? OR (b.page=? AND b.position>=?))
+        WHERE b.paper_id=? AND b.kind NOT IN ('image','legacy') AND (b.page>? OR (b.page=? AND b.position>=?))
         ORDER BY b.page,b.position""", (paper["id"], heading["page"], heading["page"], heading["position"]))
     outline = {(entry["page"], identity(entry["title"])) for entry in paper["outline"]}
     lines = []
     for page, group in groupby(rows, key=lambda row: row["page"]):
         blocks = [{**row, "bbox": json.loads(row["bbox"])} for row in group]
-        classify_reading_blocks(blocks, paper, page, blocks[0]["height"])
+        furniture = page_margin_elements(blocks, blocks[0]["height"], page, paper["title"], document_furniture(path))
+        classify_reading_blocks(blocks, paper, page, blocks[0]["height"], furniture=furniture)
         for block in blocks:
             if block["reading_role"] == "extra":
                 continue
@@ -438,12 +440,12 @@ def paper_references(store, paper):
     with store.connect() as db:
         headings = []
         for row in db.execute("""SELECT id,page,position,text,geometry FROM blocks
-            WHERE paper_id=? AND kind!='image' ORDER BY page,position""", (paper["id"],)):
+            WHERE paper_id=? AND kind NOT IN ('image','legacy') ORDER BY page,position""", (paper["id"],)):
             for line in _block_lines(row):
                 if REFERENCE_HEADING.fullmatch(line["text"]):
                     headings.append({**row, "offset": line["offset"], "label": line["text"], "left": line["left"], "top": line["top"]})
         for heading in headings:
-            if entries := _entries(db, paper, heading):
+            if entries := _entries(db, paper, heading, store.original(paper["id"])):
                 _link_library_entries(db, paper, entries)
                 return {"entries": entries, "heading": _anchor(heading, heading["offset"], heading["label"])}
         if headings:

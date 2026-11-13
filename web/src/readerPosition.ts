@@ -7,6 +7,18 @@ const guide = 32;
 const fraction = (value: number) => Math.round(Math.max(0, Math.min(1, value)) * 100000) / 100000;
 const relativeTop = (element: Element, pane: HTMLElement) => element.getBoundingClientRect().top - pane.getBoundingClientRect().top;
 
+function visibleAnchor(anchor: HTMLElement) {
+  // Closed details can retain positive child rectangles in Chromium. Those
+  // boxes describe hidden content, not a passage under the reading guide.
+  if (anchor.checkVisibility?.() === false) return false;
+  for (let details = anchor.parentElement?.closest<HTMLDetailsElement>('details:not([open])'); details;
+    details = details.parentElement?.closest<HTMLDetailsElement>('details:not([open])')) {
+    const summary = details.querySelector(':scope > summary');
+    if (!summary?.contains(anchor)) return false;
+  }
+  return true;
+}
+
 function pageAt(pages: HTMLElement, y: number) {
   // Sections are ordered even as earlier and later pages are inserted.
   let left = 0, right = pages.children.length - 1;
@@ -82,6 +94,7 @@ export function capturePosition(pane: HTMLElement | null, page: number, side: Re
   }
   let previous: HTMLElement | undefined;
   for (const anchor of (section ?? pane).querySelectorAll<HTMLElement>('[data-block-anchor]')) {
+    if (!visibleAnchor(anchor)) continue;
     const rect = anchor.getBoundingClientRect();
     if (!rect.height) continue;
     const top = rect.top - paneTop;
@@ -93,6 +106,8 @@ export function capturePosition(pane: HTMLElement | null, page: number, side: Re
     const chosen = top <= guide ? anchor : bridgeGap && section && previous && paneTop + guide - previous.getBoundingClientRect().bottom < 32 ? previous : undefined;
     if (chosen) {
       position.block_id = chosen.dataset.blockAnchor;
+      const actualPage = Number(chosen.dataset.blockPage || chosen.closest<HTMLElement>('[data-page-start]')?.dataset.pageStart);
+      if (Number.isInteger(actualPage) && actualPage > 0) position.page = actualPage;
       position.offset = chosen === anchor ? fraction((guide - top) / rect.height) : 1;
       position.side = chosen.dataset.readingSide === 'translation' ? 'translation' : 'source';
       break;
@@ -106,7 +121,6 @@ export function scrollForPosition(pane: HTMLElement, position: Position, side: R
   const inset = move?.focus ? Math.min(110, pane.clientHeight * .23) : guide;
   const pages = pane.querySelector('[data-reading-pages]');
   const section = pages?.querySelector<HTMLElement>(`[data-reading-page="${position.page}"]`);
-  if (pages && !section) return pane.scrollTop;
   if (position.block_id && pdf) {
     const block = pdf.blocks.find(block => block.id === position.block_id);
     const sheet = pane.querySelector<HTMLElement>('.pdf-page');
@@ -115,14 +129,33 @@ export function scrollForPosition(pane: HTMLElement, position: Position, side: R
       return pane.scrollTop + relativeTop(sheet, pane) + y / pdf.height * sheet.clientHeight - inset;
     }
   } else if (position.block_id) {
-    const anchors = [...(section ?? pane).querySelectorAll<HTMLElement>(`[data-block-anchor="${CSS.escape(position.block_id)}"]`)];
-    const anchor = anchors.find(element => element.dataset.readingSide === side) ?? anchors[0];
-    const extras = anchor?.closest('details');
-    if (move && extras) extras.open = true;
+    const anchors = [...pane.querySelectorAll<HTMLElement>(`[data-block-anchor="${CSS.escape(position.block_id)}"]`)];
+    let anchor = anchors.find(element => element.dataset.readingSide === side) ?? anchors[0];
+    let offset = position.offset ?? 0;
+    if (anchor?.dataset.readingOwner) {
+      const owners = [...pane.querySelectorAll<HTMLElement>(`[data-block-anchor="${CSS.escape(anchor.dataset.readingOwner)}"]`)];
+      const owner = owners.find(element => element.dataset.readingSide === side);
+      if (owner) {
+        const count = owner.querySelector('[data-text-block]')?.textContent?.length ?? 0;
+        const start = Number(anchor.dataset.ownerStart) || 0, end = Number(anchor.dataset.ownerEnd) || start;
+        offset = count ? (start + (end - start) * offset) / count : 0;
+        anchor = owner;
+      }
+    }
+    if (move) for(let details=anchor?.closest('details')??null;details;details=details.parentElement?.closest('details')??null) details.open=true;
     if (anchor && anchor.getBoundingClientRect().height > 0) {
       const hit = move?.hit?.side === side ? anchor.querySelector<HTMLElement>('[data-find-hit]') : null;
-      return pane.scrollTop + relativeTop(hit ?? anchor, pane) + (hit ? 0 : anchor.getBoundingClientRect().height * (position.offset ?? 0)) - inset;
+      return pane.scrollTop + relativeTop(hit ?? anchor, pane) + (hit ? 0 : anchor.getBoundingClientRect().height * offset) - inset;
     }
+  }
+  const starts = [...(pages?.querySelectorAll<HTMLElement>(`[data-page-start="${position.page}"]`) ?? [])];
+  const pageStart = starts.find(element => element.dataset.readingSide === side && element.getBoundingClientRect().height > 0);
+  if (pageStart) {
+    const start = pageStart.getBoundingClientRect();
+    const height = Math.max(1,(section?.getBoundingClientRect().bottom ?? start.bottom) - start.top);
+    const pageTop = pane.scrollTop + relativeTop(pageStart,pane);
+    if (position.page_fraction !== undefined) return pageTop + position.page_fraction * height - inset;
+    return pageTop - inset + (position.scroll ?? 0) * Math.max(0,height - pane.clientHeight);
   }
   if (section) {
     const height = section.getBoundingClientRect().height;
@@ -130,5 +163,6 @@ export function scrollForPosition(pane: HTMLElement, position: Position, side: R
     if (position.page_fraction !== undefined) return pageTop + position.page_fraction * height - inset;
     return pageTop - inset + (position.scroll ?? 0) * Math.max(0, height - pane.clientHeight);
   }
+  if (pages) return pane.scrollTop;
   return (position.page_fraction ?? position.scroll ?? 0) * Math.max(0, pane.scrollHeight - pane.clientHeight);
 }

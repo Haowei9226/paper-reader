@@ -1,4 +1,5 @@
 from urllib.parse import unquote
+from xml.sax.saxutils import escape
 
 import httpx
 import pymupdf
@@ -213,3 +214,87 @@ def test_unique_title_fallback_fills_missing_bibliography(client, monkeypatch):
     found = lookup(client, paper["id"])
     assert found["metadata_status"] == "matched" and found["doi"] == "10.1234/reader.example"
     assert found["filename"].startswith("Alice Ng - 2024 - ")
+
+
+PRINTED_SOURCE = "The Annual Symposium on Reading Technology (READ ’25), September 28–October 01, 2025, Busan, Republic of Korea"
+BROKEN_SOURCE = "The Annual Symposium on Reading Technology (READ '25), September 28â•ﬁOctober 01, 2025, Busan, Republic of Korea"
+GEOMETRY_TITLE = "Shared Representations for Coordinated Reading"
+
+
+def corrupt_xmp_pdf(source=BROKEN_SOURCE, printed_sources=(PRINTED_SOURCE,)):
+    import textwrap
+
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        page.insert_text((48, 80), GEOMETRY_TITLE, fontsize=18)
+        page.insert_text((48, 112), "Alice Ng, Leah Lee", fontsize=11)
+        page.insert_text((48, 132), "University of Reading, Department of Design", fontsize=10)
+        page.insert_text((48, 168), "Abstract", fontsize=13)
+        page.insert_text((48, 190), "A study of shared representations and coordinated reading.", fontsize=11)
+        bad_title = GEOMETRY_TITLE + " Alice Ng Leah Lee University of Reading Department of Design"
+        doc.set_metadata({"title": bad_title, "author": "Alice Ng"})
+        doc.set_xml_metadata(
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">'
+            '<rdf:RDF><rdf:Description><dc:title>' + escape(bad_title) + '</dc:title><prism:publicationName>'
+            + escape(source) + '</prism:publicationName></rdf:Description></rdf:RDF></x:xmpmeta>')
+        font = pymupdf.Font("tibo")
+        for printed in printed_sources:
+            page = doc.new_page()
+            page.insert_font(fontname="embedded", fontbuffer=font.buffer)
+            page.insert_text((48, 70), "ACM Reference Format:\n" + "\n".join(textwrap.wrap(printed, width=72)),
+                             fontsize=10, fontname="embedded")
+        return doc.tobytes()
+
+
+def test_corrupt_xmp_has_independent_printed_source_and_visible_title(client):
+    from reader.metadata import merge_bibliography, pdf_clues
+
+    raw = corrupt_xmp_pdf()
+    paper = import_and_parse(client, raw)
+    assert paper["title"] == GEOMETRY_TITLE
+    assert paper["authors"] == "Alice Ng; Leah Lee"
+    assert paper["source"] == PRINTED_SOURCE
+    assert client.store.original(paper["id"]).read_bytes() == raw
+
+    # The same local evidence cannot supersede the user's reviewed bibliography.
+    reviewed = client.patch(f"/api/papers/{paper['id']}", json={"title": "Reviewed title", "source": "Reviewed venue"}).json()
+    with pymupdf.open(stream=raw) as doc:
+        fields = pdf_clues(doc).fields
+    updates = merge_bibliography(reviewed, fields, online=False, auto_rename=False, allow_name=False)
+    assert "title" not in updates and "source" not in updates
+    assert client.get(f"/api/papers/{paper['id']}").json()["source"] == "Reviewed venue"
+
+
+def test_corrupt_source_without_matching_printed_evidence_is_preserved():
+    from reader.metadata import pdf_clues
+
+    with pymupdf.open(stream=corrupt_xmp_pdf(printed_sources=(PRINTED_SOURCE.replace("2025", "2024"),))) as doc:
+        assert pdf_clues(doc).fields["source"] == BROKEN_SOURCE
+    # Valid XMP metadata may deliberately contain a longer/different venue name.
+    with pymupdf.open(stream=corrupt_xmp_pdf(source="Reviewed Conference on Reading Technology")) as doc:
+        assert pdf_clues(doc).fields["source"] == "Reviewed Conference on Reading Technology"
+
+
+def test_corrupt_source_with_two_different_printed_copies_is_not_guessed():
+    from reader.metadata import pdf_clues
+
+    sources = (PRINTED_SOURCE, PRINTED_SOURCE.replace("–", "—"))
+    with pymupdf.open(stream=corrupt_xmp_pdf(printed_sources=sources)) as doc:
+        assert pdf_clues(doc).fields["source"] == BROKEN_SOURCE
+
+
+def test_existing_source_header_is_read_only_and_respects_manual_bibliography(client):
+    paper = import_and_parse(client, corrupt_xmp_pdf())
+    pid = paper["id"]
+    with client.store.connect() as db:
+        db.execute("UPDATE papers SET source=?,manual_fields='[]' WHERE id=?", (BROKEN_SOURCE, pid))
+    data = client.get(f"/api/papers/{pid}/pages/1").json()
+    assert data["reading_source"] == PRINTED_SOURCE
+    exported = client.get(f"/api/papers/{pid}/export/html").text
+    assert PRINTED_SOURCE.replace("&", "&amp;") in exported
+    assert client.get(f"/api/papers/{pid}").json()["source"] == BROKEN_SOURCE
+    client.patch(f"/api/papers/{pid}", json={"source": "A manually reviewed venue"})
+    client.patch(f"/api/papers/{pid}", json={"source": BROKEN_SOURCE})
+    assert "reading_source" not in client.get(f"/api/papers/{pid}/pages/1").json()
+    assert client.get(f"/api/papers/{pid}").json()["source"] == BROKEN_SOURCE

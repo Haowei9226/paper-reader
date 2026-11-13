@@ -229,7 +229,8 @@ function superscriptRanges(block:Block, text:string, known:ReadonlySet<number>) 
   return ranges;
 }
 
-export function citationRanges(block:Block, text:string, source:ReadonlySet<number>|CitationLinks):CitationRange[] {
+export function citationRanges(block:Block, text:string, source:ReadonlySet<number>|CitationLinks,
+                               excludedRanges:readonly {start:number;end:number}[] = []):CitationRange[] {
   if (excluded.has(block.reading_role ?? block.kind)) return [];
   const links = 'known' in source ? source : {known:source,entries:[]};
   const numeric = links.known;
@@ -256,9 +257,10 @@ export function citationRanges(block:Block, text:string, source:ReadonlySet<numb
     }
   }
   ranges.push(...superscriptRanges(block,text,numeric));
-  ranges.sort((a,b) => a.start - b.start || b.end - a.end);
+  const visible = ranges.filter(range => !excludedRanges.some(note => range.start < note.end && note.start < range.end));
+  visible.sort((a,b) => a.start - b.start || b.end - a.end);
   const result:CitationRange[] = [];
-  for (const range of ranges) {
+  for (const range of visible) {
     const previous = result.at(-1);
     if (previous && range.start < previous.end) continue;
     if (previous && /^\s*$/u.test(text.slice(previous.end,range.start))) {

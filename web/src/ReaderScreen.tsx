@@ -4,6 +4,7 @@ import {api,patch,post} from './api';
 import {Busy,ErrorLine,IconButton,Modal,PublicationBadge} from './components';
 import {AlignmentDialog,NoteDialog,OcrDialog,TranslationDialog} from './Dialogs';
 import ReferencesPanel, {type ReferenceFocus} from './ReferencesPanel';
+import DocumentNotesPanel, {type DocumentNoteFocus} from './DocumentNotesPanel';
 import FindPanel from './FindPanel';
 import HtmlStream from './HtmlStream';
 import HtmlView, {indexAnnotations, readableText} from './HtmlView';
@@ -11,10 +12,11 @@ import {AIPanel,InfoPanel,NotesPanel} from './Panels';
 import PdfView from './PdfView';
 import SelectionTools, {useCounterpart} from './SelectionTools';
 import {PROVIDERS,PROVIDER_NAMES} from './types';
-import type {AIResult,Annotation,Block,Bootstrap,FindHit,Job,Layout,Locator,PageData,Paper,Provider,ReadingMode,ReadingSide,ReferenceAnchor,ReferenceIndex,Selection} from './types';
+import type {AIResult,Annotation,Block,Bootstrap,DocumentNotesIndex,FindHit,Job,Layout,Locator,PageData,Paper,Provider,ReadingMode,ReadingSide,ReferenceAnchor,ReferenceIndex,Selection} from './types';
 import {useReadingPosition} from './useReadingPosition';
 import type {Move,Position} from './readerPosition';
 import {useHtmlPages} from './useHtmlPages';
+import {documentIndexRevision} from './documentNotes';
 
 type Task = {kind: 'translate' | 'summary'; page: number};
 export type ReferenceReturn = {
@@ -26,8 +28,12 @@ export type ReferenceReturn = {
   sync: boolean;
   showToc: boolean;
   focus: ReferenceFocus | null;
+  panel?: 'references'|'document-notes';
+  noteFocus?: DocumentNoteFocus|null;
+  noteOrigin?: Position|null;
 };
 const emptyReferences:ReferenceIndex = {entries:[],heading:null};
+const emptyDocumentNotes:DocumentNotesIndex = {entries:[],markers:[]};
 const readerAnnotationLimit = 3000;
 
 function annotationMove(annotation: Annotation | null, paper: Paper): Move | undefined {
@@ -78,10 +84,24 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
   const [showToc,setShowToc] = useState(returnPoint?.showToc ?? false);
   const [sync,setSync] = useState(returnPoint?.sync ?? true);
   const [fontSize,setFontSize]=useState(bootstrap.settings.font_size),[provider,setProvider]=useState<Provider>(bootstrap.settings.provider),[results,setResults]=useState<AIResult[]>([]),[selection,setSelection]=useState<Selection|null>(null),[noteOpen,setNoteOpen]=useState(false),[noteSelection,setNoteSelection]=useState<Selection|null>(null),[aligning,setAligning]=useState<Annotation|null>(null),[editingTranslation,setEditingTranslation]=useState<Block|null>(null),[task,setTask]=useState<Task|null>(null),[submitting,setSubmitting]=useState(false),[question,setQuestion]=useState(''),[pageInput,setPageInput]=useState<string|null>(null);
-  const [rightTab,setRightTab] = useState<'info'|'notes'|'ai'|'find'|'references'>(returnPoint?'references':'notes');
+  const [rightTab,setRightTab] = useState<'info'|'notes'|'ai'|'find'|'references'|'document-notes'>(returnPoint?.panel??(returnPoint?'references':'notes'));
   const [references,setReferences] = useState<ReferenceIndex|null>(null);
   const [referenceError,setReferenceError] = useState('');
   const [referenceFocus,setReferenceFocus] = useState<ReferenceFocus|null>(returnPoint?.focus??null);
+  const [documentNotes,setDocumentNotes] = useState<DocumentNotesIndex|null>(null);
+  const [documentNotesError,setDocumentNotesError] = useState('');
+  const [noteFocus,setNoteFocus] = useState<DocumentNoteFocus|null>(returnPoint?.noteFocus??null);
+  const [noteOrigin,setNoteOrigin] = useState<Position|null>(returnPoint?.noteOrigin??null);
+  const sourceIndexRevision = documentIndexRevision(jobs);
+  useEffect(() => {
+    setDocumentNotesError('');
+    if (!paper.blocks_count) {setDocumentNotes(emptyDocumentNotes);return}
+    const request = new AbortController();
+    void api<DocumentNotesIndex>(`/papers/${paper.id}/notes`,{signal:request.signal}).then(index => {
+      if (!request.signal.aborted) setDocumentNotes(index);
+    }).catch(error => {if (!request.signal.aborted) setDocumentNotesError((error as Error).message)});
+    return () => request.abort();
+  }, [paper.id,paper.blocks_count,paper.parse_state,paper.title,paper.authors,paper.year,paper.doi,sourceIndexRevision]);
   useEffect(() => {
     setReferenceError('');
     if (!paper.blocks_count) {setReferences(emptyReferences);return}
@@ -92,7 +112,7 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
       if (!request.signal.aborted) setReferenceError((error as Error).message);
     });
     return () => request.abort();
-  }, [paper.id,paper.blocks_count,paper.parse_state,refreshKey]);
+  }, [paper.id,paper.blocks_count,paper.parse_state,paper.title,paper.authors,paper.year,paper.doi,sourceIndexRevision]);
   const openCitation = useCallback((numbers:number[]) => {
     if (!numbers.length) return;
     setReferenceFocus(previous => ({numbers,active:numbers[0],request:(previous?.request ?? 0) + 1}));
@@ -113,6 +133,14 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
   const data=pdf?(pagedData?.number===page?pagedData:null):flow.target;
   const onPageVisible=useCallback((visible:number)=>{setPage(visible);setSelectedHeading(null)},[]);
   const position=useReadingPosition({paper,page,mode:sourceMode,layout,singleSide,data,pdf,pdfLayout,sync,sourcePane,targetPane,onPageVisible,initialMove});
+  const currentPosition=position.current;
+  const openDocumentNote=useCallback((ids:string[])=>{
+    if (!ids.length) return;
+    setNoteOrigin(currentPosition());
+    setNoteFocus(previous=>({ids,active:ids[0],request:(previous?.request??0)+1}));
+    setRightTab('document-notes');setShowRight(true);
+  },[currentPosition]);
+  const noteLinks=useMemo(()=>({entries:documentNotes?.entries??[],markers:documentNotes?.markers??[],open:openDocumentNote}),[documentNotes,openDocumentNote]);
   const counterpart=useCounterpart(paper.id,selection,pdf),preview=counterpart?.data;
   const place=position.place;
   useLayoutEffect(()=>{
@@ -208,6 +236,21 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
     onReturnReference();
     void position.save();
   }
+  function followNoteReference(paperId:string,noteId:string) {
+    const focus={ids:noteFocus?.ids.includes(noteId)?noteFocus.ids:[noteId],active:noteId,request:(noteFocus?.request??0)+1};
+    setNoteFocus(focus);
+    onFollowReference(paperId,{paperId:paper.id,title:paper.title,position:position.current(),layout,singleSide,sync,showToc,
+      focus:referenceFocus,panel:'document-notes',noteFocus:focus,noteOrigin});
+    void position.save();
+  }
+  function returnToNoteOrigin() {
+    if (!noteOrigin) return;
+    position.navigate({position:noteOrigin});
+    changePage(noteOrigin.page);
+    if(layout!=='interleaved'&&noteOrigin.mode)setSourceMode(noteOrigin.mode);
+    if(layout==='single')setSingleSide(noteOrigin.side??'source');
+    if(window.innerWidth<=1050)setShowRight(false);
+  }
   const selectAnnotation=useCallback((a:Annotation)=>{setSelectedAnnotation(a.id);setRightTab('notes');setShowRight(true)},[]);
   function openAnnotation(annotation: Annotation) {
     selectAnnotation(annotation);
@@ -283,12 +326,15 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
     preview,
     onTranslate: openTranslation,
     citations: citationLinks,
+    noteLinks,
+    documentNotes: documentNotes?.entries??[],
   };
   const streamProps={...htmlReaderProps,pages:flow.pages,anchorPage,viewportKey:`${showToc}:${showRight}`,canPrepend:flow.canPrepend,canAppend:flow.canAppend,extend:flow.extend,retry:flow.retry,place:position.place};
   const originalPdf = <PdfView
     paperId={paper.id} pageNumber={page} data={data} annotations={annotations} hit={position.hit} preview={preview} onLayout={onPdfLayout}
     onSelect={setSelection} onAnnotation={selectAnnotation}
     citations={citationLinks}
+    noteLinks={noteLinks}
   />;
   const hasText=paper.parse_state==='ready'||paper.parse_state==='processing';
   const currentHeading=selectedHeading??paper.outline.findIndex(entry=>entry.page===page);
@@ -347,7 +393,7 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
         </div>
         <div className="pane-scroll" ref={targetPane} tabIndex={0} aria-label="译文阅读区" onScroll={() => position.trackScroll('translation')}>
           {!pdf && paper.pages > 0 ? <HtmlStream {...streamProps} side="translation"/>
-            : data ? <HtmlView {...htmlReaderProps} side="translation" page={page} blocks={data.blocks} tables={data.tables} onPageChange={go}/>
+            : data ? <HtmlView {...htmlReaderProps} side="translation" page={page} blocks={data.blocks} tables={data.tables} publicationSource={data.reading_source} onPageChange={go}/>
             : <Busy text="等待正文解析"/>}
         </div>
       </section>
@@ -372,6 +418,7 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
       <button className={rightTab==='ai'?'selected':''} onClick={()=>setRightTab('ai')}><Sparkles size={13}/>AI</button>
       <button className={rightTab==='find'?'selected':''} onClick={openFind}>查找</button>
       <button className={rightTab==='references'?'selected':''} onClick={()=>{setRightTab('references');setReferenceFocus(null)}}>参考文献</button>
+      <button className={rightTab==='document-notes'?'selected':''} onClick={()=>setRightTab('document-notes')}>注释</button>
       <IconButton label="收起侧栏" onClick={()=>{setShowRight(false);position.clearHit()}}><X size={15}/></IconButton>
     </div>
     <div className="reader-panel-scroll" key={rightTab}>
@@ -379,6 +426,9 @@ export default function ReaderScreen({paper,bootstrap,jobs,refreshKey,initialAnn
         :rightTab==='references'?<ReferencesPanel index={references} error={referenceError} focus={referenceFocus} onJump={jumpToReference}
           navigating={navigatingReference} onOpenPaper={followReference}
           onFocus={active=>setReferenceFocus(previous=>previous?{...previous,active}:{numbers:[active],active,request:1})}/>
+        :rightTab==='document-notes'?<DocumentNotesPanel index={documentNotes} error={documentNotesError} focus={noteFocus}
+          navigating={navigatingReference} canReturn={!!noteOrigin} onJump={jumpToReference} onOpenPaper={followNoteReference}
+          onReturn={returnToNoteOrigin} onFocus={active=>setNoteFocus(previous=>previous?{...previous,active}:{ids:[active],active,request:1})}/>
         :rightTab==='info'?<InfoPanel paper={paper} bootstrap={bootstrap} onEdit={onEdit} onChange={refresh} onOpen={()=>{}} onDeleted={()=>onBack()}/>
         :rightTab==='notes'?<NotesPanel paper={paper} annotations={annotations} selectedId={selectedAnnotation} onChange={refresh} onNew={()=>newNote(null)} onOpenAnnotation={openAnnotation} onAlign={setAligning} onAIAlign={a=>{void startJob({kind:'align',annotation_id:a.id,selected_language:'source'}).catch(()=>{})}}/>
         :<AIPanel paper={paper} results={results} jobs={jobs} provider={provider} onProvider={setModel} onQuestion={()=>{void startJob({kind:'reading',task:'question',question,conversation_memory:true}).then(()=>setQuestion('')).catch(()=>{})}} onSummary={()=>setTask({kind:'summary',page})} onJump={jump} onSaved={refresh} question={question} setQuestion={setQuestion}/>}

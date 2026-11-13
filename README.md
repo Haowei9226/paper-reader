@@ -7,7 +7,7 @@
 <p>PDF 原件与可重排正文 · 中英对照 · 来源标注 · 按篇 AI 助手</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.6.14-2563eb?style=flat-square" alt="Version 0.6.14" />
+  <img src="https://img.shields.io/badge/version-0.6.15-2563eb?style=flat-square" alt="Version 0.6.15" />
   <img src="https://img.shields.io/badge/data-local-0f766e?style=flat-square" alt="Local data" />
   <img src="https://img.shields.io/badge/Windows-x64-0078d4?style=flat-square" alt="Windows x64" />
   <img src="https://img.shields.io/badge/macOS-Apple%20%26%20Intel-555555?style=flat-square" alt="macOS Apple Silicon and Intel" />
@@ -31,6 +31,17 @@ PaperReader 是一个在本机运行的文献管理与中英双语阅读器。�
 
 > **平台状态：** Windows x64 成品已完成实际运行验证。Mac 包包含 Apple 芯片和 Intel 两套运行环境，已检查归档、依赖与执行权限，**尚未经真实 Mac 运行验证**，也未签名或公证。扫描件 OCR 目前仅支持 Windows。
 
+<a id="whats-new"></a>
+## 0.6.15 更新
+
+- **脚注与尾注可以回到出处。** 根据 PDF 上标、内部链接与注释位置识别注号，在正文和「注释」侧栏之间跳转，并返回原阅读位置。页内重复编号分别处理，无法确认的关系保留为未匹配。
+- **正文阅读更连贯。** 根据列、行距、缩进与字体恢复段落和列表，衔接能确认的跨页续文，同时保留原页码与来源锚点。
+- **字符修复依靠 PDF 证据。** 有可靠字形和几何映射时，修复连字、重音和缺失词距；保留数学字符与真实连字符。
+- **重新转换保护已有阅读成果。** 迁移能确认的译文、批注和引用定位，保留译文版本与阅读位置；无法安全映射的正文页沿用旧版，并在任务结果中说明。已被引用的旧页眉、页脚或图内短标签单独保留出处。
+- **文首与页边内容分得更清楚。** 改进题名、作者与单位、摘要、出版侧栏、审稿行号及重复页眉页脚的识别，减少它们打断正文的情况。
+
+升级前建议先创建本地备份。要让已有文献使用新版文字提取与版面处理，打开文献后点击 **重新转换 HTML**，再对照 PDF 核对结果；复杂版式和缺少可靠字形映射的内容仍可能需要人工检查。
+
 <a id="download"></a>
 ## 下载
 
@@ -38,9 +49,9 @@ PaperReader 是一个在本机运行的文献管理与中英双语阅读器。�
 
 | 下载项 | 适合谁 | 包内内容 |
 | --- | --- | --- |
-| [完整分享包 · Windows + Mac](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Share-0.6.14.zip) | 首次使用，或转发给同事 | 两个平台包、使用说明、应用源码、第三方源码和许可；约 306 MB |
-| [Windows x64 程序包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Windows-0.6.14.zip) | 只需要 Windows 程序 | 解压后运行「文献阅读器.exe」 |
-| [Mac 双架构程序包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-macOS-0.6.14.zip) | Apple 芯片或 Intel Mac | 解压后打开「文献阅读器.app」；请留意上方验证范围 |
+| [完整分享包 · Windows + Mac](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Share-0.6.15.zip) | 首次使用，或转发给同事 | 两个平台包、使用说明、应用源码、第三方源码和许可；大小见发布页 |
+| [Windows x64 程序包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Windows-0.6.15.zip) | 只需要 Windows 程序 | 解压后运行「文献阅读器.exe」 |
+| [Mac 双架构程序包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-macOS-0.6.15.zip) | Apple 芯片或 Intel Mac | 解压后打开「文献阅读器.app」；请留意上方验证范围 |
 
 完整分享包内的平台 ZIP 还需要再解压一次。完整源码与第三方许可随总包提供，也可从本仓库及发布页获取；再分发时请保留这些材料。
 
@@ -48,6 +59,7 @@ PaperReader 是一个在本机运行的文献管理与中英双语阅读器。�
 <summary><strong>查看目录</strong></summary>
 
 - [安装与启动](#quick-start)
+- [0.6.15 更新](#whats-new)
 - [界面预览](#preview)
 - [功能一览](#features)
 - [一次阅读如何完成](#workflow)
@@ -117,6 +129,7 @@ Mac 包保留了 Unix 执行权限和符号链接。请直接在 Mac 上解压�
 | **来源标注** | 在 PDF、HTML 和译文中查看同一条批注；从笔记跳回原文；修正跨语言短语对应 |
 | **连续翻译** | 后台任务、进度与续译；缺失段落补译；保留人工修改、译文版本和按篇术语 |
 | **参考文献导航** | 从正文引用定位参考条目；唯一匹配的库内文献可直接打开，再逐篇返回引用处 |
+| **原文脚注与尾注** | 从能确认的正文注号打开原文注释，跳到注释所在页并返回正文；识别到的文献可继续跳转 |
 | **按篇 AI 阅读** | 结构化摘要、选段解释和文献问答；每篇独立对话；从回答出处跳回提供的原文 |
 | **扫描件处理** | Windows 系统 OCR 识别无文字页，将文字与坐标存入本地文献库，原 PDF 保持原样 |
 | **带走阅读成果** | 带高亮和批注的 PDF、独立双语 HTML、Markdown 笔记，以及 CSV / BibTeX / RIS 书目 |
@@ -125,15 +138,19 @@ Mac 包保留了 Unix 执行权限和符号链接。请直接在 Mac 上解压�
 <details>
 <summary><strong>展开阅读、翻译与标注细节</strong></summary>
 
-**阅读与定位。** HTML 正文按需加载附近页面，可连续滚动。文献内查找会标出原文与已有译文的命中位置，目录、笔记和可核对的 AI 出处都可跳回对应段落。阅读器会保存 PDF / HTML 模式及页内位置。
+**阅读与定位。** HTML 正文按需加载附近页面，可连续滚动。PDF 中拆成单行的正文按列、行距和缩进接回段落，确认连续的跨页段落也会衔接；原始文字与标注锚点保留。文献内查找会标出原文与已有译文的命中位置，目录、笔记和可核对的 AI 出处都可跳回对应段落。阅读器会保存 PDF / HTML 模式及页内位置。
 
-**复杂内容。** 表格可按识别到的行列阅读和翻译，必要时查看原表；独立公式与部分图形保留 PDF 截图。带审稿行号、重复页眉页脚的文献会尝试过滤这些版式文字。重新转换 HTML 时，已有译文与笔记的来源位置会受到保护。
+**复杂内容。** 根据几何和字体区分题名、多列作者、单位、摘要、版权、出版侧栏、印刷页码和重复页眉页脚。双栏续句、悬挂列表和同一 PDF 文本块中的段落按版面证据重排；图内文字随原图保留，可展开查找。表格可按识别到的行列阅读和翻译，独立公式与部分图形保留 PDF 截图。字体明确声明的连字、重音和缺失词距会尝试恢复，数学 Unicode 和真实连字符保留。
+
+**转换边界。** 字体与词距修复需点击「重新转换 HTML」。重新提取时，根据同一 PDF 字形的物理位置迁移译文、批注和引用的原文定位，保留译文内容、历史版本和阅读位置。曾被引用的旧页眉、页脚或短图内标签会单独收入「保留的原文定位」，不阻止整页正文更新，也不再加入翻译或 AI 阅读。无法证明安全映射的正文仍保留原页，任务结果会说明保留页数。没有可靠字形映射的乱码、复杂叠排和无文本扫描件不能保证自动准确恢复，仍可随时核对 PDF 原件；Windows 上的扫描件可使用本地 OCR。
 
 **翻译任务。** 任务可以暂停、退出后继续；分批处理时沿用本篇已有术语。检测到被分页截断的句子时，会尝试跨页合并翻译。重新翻译或人工编辑创建新版本，受影响的短语对应会提示校对。自动对应是模型建议，可由使用者修正。
 
 **书目信息。** 可使用 DOI、arXiv 编号或标题查询 Crossref / DataCite，并生成基于作者、年份和标题的附件名。手动字段和附件名会保留。未发表手稿和内部资料跳过自动联网查询；主动点击单篇「联网补全」仍会进行公开检索。分享版默认关闭自动联网补全。
 
 **引用链。** 参考条目优先按 DOI 匹配库内文献，没有 DOI 时尝试完整标题、首位作者和年份的唯一匹配。打开库内文献后，「返回引用处」可恢复上一份文献的位置；库外条目提供浏览器链接或检索入口。
+
+**脚注与尾注。** 根据原始 PDF 的上标、内部链接和注释位置识别注号，点击 PDF 或 HTML 正文中的注号可打开「注释」侧栏，并跳到原始注释、返回正文阅读位置。注释中识别到的文献沿用库内匹配和浏览器入口；普通说明保留文字。页内重复编号分别定位，无法确认的上标和简写引用不会强行匹配。HTML 中完整识别的注释收在「本页注释」中，保留原文位置。
 
 </details>
 
@@ -377,7 +394,7 @@ docs/               分享说明与演示图片
 <a id="license"></a>
 ## 许可与参与
 
-PaperReader 的本版应用代码按 **GNU AGPL v3** 提供，见 [LICENSE](LICENSE)。PyMuPDF / MuPDF 及其他第三方软件保留各自的许可和声明；[完整分享包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.14/PaperReader-Share-0.6.14.zip)附应用源码、对应 PDF 引擎源码与许可材料。
+PaperReader 的本版应用代码按 **GNU AGPL v3** 提供，见 [LICENSE](LICENSE)。PyMuPDF / MuPDF 及其他第三方软件保留各自的许可和声明；[完整分享包](https://github.com/Haowei9226/paper-reader/releases/download/v0.6.15/PaperReader-Share-0.6.15.zip)附应用源码、对应 PDF 引擎源码与许可材料。
 
 欢迎通过 [Issues](https://github.com/Haowei9226/paper-reader/issues) 提交可复现的问题或功能建议。请附系统版本、程序版本、操作步骤及已脱敏的错误信息；不要上传 API 密钥、私人论文、整个数据库或未清理的日志。可公开分享的最小合成 PDF 样例通常更方便复现排版问题。
 

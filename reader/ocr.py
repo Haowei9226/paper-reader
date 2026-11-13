@@ -163,7 +163,7 @@ def _save_page(store, job, number, blocks, *, infer_outline):
                     (SELECT 1 FROM json_each(manual_fields) WHERE value='language') THEN ? ELSE language END
                 WHERE id=?""", (now(), language, paper_id))
             if infer_outline and any(block[0] == "heading" for block in blocks):
-                db.execute("UPDATE papers SET outline=? WHERE id=?", (dumps(_heading_outline(db, paper_id)), paper_id))
+                db.execute("UPDATE papers SET outline=? WHERE id=?", (dumps(_heading_outline(db, paper_id, store.original(paper_id))), paper_id))
 
 
 def ocr_job(store, job):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import threading
 import time
@@ -12,7 +13,23 @@ import httpx
 from . import ROOT, SHARED_BUILD
 from .processes import ProcessGroup
 
-SOURCE = ROOT.parent / "蓝色大肥鱼" / "runtime" / "local-ai"
+def runtime_source():
+    """Optional developer runtime; shared builds connect to the user's Ollama."""
+    if not SHARED_BUILD:
+        configured = os.environ.get("READER_LOCAL_RUNTIME_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
+        try:
+            local = json.loads((ROOT / ".reader-local.json").read_text(encoding="utf-8"))
+            configured = local.get("local_runtime_dir") if isinstance(local, dict) else None
+            if isinstance(configured, str) and configured.strip():
+                return Path(configured).expanduser().resolve()
+        except (OSError, UnicodeError, ValueError):
+            pass
+    return ROOT / "runtime" / "local-ai"
+
+
+SOURCE = runtime_source()
 DEFAULT_MODEL = "qwen3.5:4b"
 
 

@@ -1,14 +1,16 @@
 """Assemble only distributable instructions, source code and license materials."""
 from importlib import metadata
 from pathlib import Path
+import re
 import shutil
 import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMON = ROOT / "output" / "release-common"
+VERSION = re.search(r'^VERSION = "([^"]+)"', (ROOT / "reader" / "__init__.py").read_text(encoding="utf-8"), re.M).group(1)
 
-BUILDING = """Rebuilding PaperReader 0.6.14
+BUILDING = """Rebuilding PaperReader __VERSION__
 
 This application distribution is provided under GNU AGPL v3 (see LICENSE).
 Third-party code retains its own notices and licenses. The complete application
@@ -28,19 +30,23 @@ Build prerequisites: Python 3.12 and Node.js 22.
    5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249
    MuPDF:
    44075a84e329db55b9bef5f342a70fd26d69e48ad1d33cb89d9664581c641156
-4. On Windows, run python scripts/package_windows.py.
-5. For macOS, run python scripts/package_macos.py --common output/release-common.
+4. On Windows, run python scripts/package_windows.py --program-only.
+5. For macOS, run python scripts/package_macos.py --output
+   output/releases/PaperReader-macOS-__VERSION__.zip (on one command line).
    This assembles published Astral Python runtimes and PyPI wheels for both
    architectures without compiling/executing Mac binaries on the build host.
    Runtimes are pinned and SHA-256 checked. Real macOS testing is still required.
+6. Run python scripts/package_share.py to combine both platform archives with
+   one copy of the instructions, application source, engine source and licenses.
+   Distribute these source and license materials alongside platform-only ZIPs.
 
 Source-mode development: python -m reader --no-browser --port 18767
 Use READER_DATA_DIR pointing to an empty directory for testing.
 The packaged launcher sets READER_SHARED_BUILD=1, which chooses a per-user data
-directory, defaults to offline metadata, and disables a developer-only adjacent
-Ollama runtime. Windows frozen workers use --reader-worker; source-mode workers
+directory and defaults to offline metadata. Users connect their own Ollama
+installation. Windows frozen workers use --reader-worker; source-mode workers
 use python -m reader.worker. Native Mac API keys use the system login Keychain.
-"""
+""".replace("__VERSION__", VERSION)
 
 
 def build():
@@ -97,11 +103,12 @@ def build():
             raise SystemExit("Download and verify the exact PDF engine source archives first (see REBUILD.txt).")
     files = []
     for folder, suffixes in (("reader", {".py", ".ps1", ".css"}), ("scripts", {".py", ".sh", ".command"}),
-                             ("tests", {".py"}), ("web/src", {".tsx", ".ts", ".css", ".svg"})):
+                             ("tests", {".py"}), ("web/src", {".tsx", ".ts", ".css", ".svg"}),
+                             ("web/scripts", {".mjs", ".js", ".ts"}), ("docs/images", {".png", ".svg", ".jpg", ".jpeg", ".webp"})):
         for path in (ROOT / folder).rglob("*"):
             if path.is_file() and path.suffix in suffixes and "__pycache__" not in path.parts:
                 files.append(path)
-    for name in ("LICENSE", "pyproject.toml", "requirements.lock", "requirements.txt", "Launch-Reader.pyw",
+    for name in (".gitignore", ".gitattributes", "LICENSE", "README.md", "README.en.md", "pyproject.toml", "requirements.lock", "requirements.txt", "Launch-Reader.pyw",
                  "Start-Reader.cmd", "Setup.cmd", "Create-Shortcut.ps1", "assets/reader.ico", "web/index.html",
                  "web/tsconfig.json", "web/vite.config.ts", "web/package.json", "web/package-lock.json",
                  "web/scripts/copy-pdf-assets.mjs", "web/public/icon.svg", "docs/SHARING.txt"):

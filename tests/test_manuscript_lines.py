@@ -110,13 +110,25 @@ def test_legacy_lines_hidden_from_html_translation_and_rebuild_without_losing_no
     assert run_job(client, job["id"])["state"] == "done"
     rebuilt = run_job(client, queue_rebuild(client, pid))
     assert rebuilt["state"] == "done", rebuilt["message"]
-    assert rebuilt["result"]["preserved_pages"] == [1]
+    assert rebuilt["result"]["preserved_pages"] == []
+    assert rebuilt["result"]["retained_source_blocks"][rail["id"]] == "line_number"
     with client.store.connect() as db:
         current = dict(db.execute("SELECT * FROM blocks WHERE id=?", (body["id"],)).fetchone())
         assert {key: current[key] for key in ("text", "bbox", "geometry")} == {
             key: body[key] for key in ("text", "bbox", "geometry")}
         assert db.execute("SELECT id FROM translations WHERE block_id=?", (body["id"],)).fetchone()[0] == translation_id
+        retained = db.execute("SELECT kind,text FROM blocks WHERE id=?", (rail["id"],)).fetchone()
+        assert tuple(retained) == ("legacy", "1")
         assert not db.execute("SELECT 1 FROM blocks WHERE paper_id=? AND page=2 AND text='53'", (pid,)).fetchone()
+        for scope in ({}, {"block_ids": [rail["id"], body["id"]]}):
+            selected, *_ = translation_blocks(db, client.store.paper(pid, db), client.store.original(pid), scope)
+            assert rail["id"] not in {block["id"] for block in selected}
+            assert body["id"] in {block["id"] for block in selected}
+    exported = client.get(f"/api/papers/{pid}/export/html").text
+    folded = re.findall(r'<details class="article-extras legacy-sources">(.*?)</details>', exported, re.S)
+    assert any("block-" + rail["id"] in content for content in folded)
+    repeated = client.store.create_job("translate", pid, {"block_ids": [rail["id"]]})
+    assert run_job(client, repeated["id"])["state"] == "done"
     saved = client.get(f"/api/papers/{pid}/annotations").json()
     assert {note["id"] for note in saved} == {note["id"] for note in notes}
     assert {note["id"]: note["targets"] for note in saved} == {note["id"]: note["targets"] for note in notes}

@@ -5,6 +5,8 @@ import type {HtmlViewProps} from './HtmlView';
 import {capturePosition, scrollForPosition} from './readerPosition';
 import type {Position} from './readerPosition';
 import {textSelection} from './selection';
+import {noteBlockIds} from './documentNotes';
+import {readingContinuations} from './readingFlow';
 import type {HtmlPageSlot} from './useHtmlPages';
 
 type StreamPagesProps = Omit<HtmlViewProps, 'page' | 'blocks' | 'tables' | 'onPageChange' | 'continuous'> & {
@@ -27,7 +29,8 @@ class StreamPages extends Component<StreamPagesProps> {
   private root = createRef<HTMLDivElement>();
 
   getSnapshotBeforeUpdate(previous: StreamPagesProps): Position | null {
-    if (previous.pages === this.props.pages && previous.fontSize === this.props.fontSize && previous.viewportKey === this.props.viewportKey) return null;
+    if (previous.pages === this.props.pages && previous.fontSize === this.props.fontSize &&
+        previous.documentNotes === this.props.documentNotes && previous.viewportKey === this.props.viewportKey) return null;
     const pane = this.root.current?.closest<HTMLElement>('.pane-scroll');
     return pane && previous.pages.some(page => page.data) ? capturePosition(pane, previous.anchorPage, previous.side, null) : null;
   }
@@ -41,6 +44,8 @@ class StreamPages extends Component<StreamPagesProps> {
   render() {
     const {pages, anchorPage, viewportKey, retry, place, hit, preview, flash, ...view} = this.props;
     const last = pages[pages.length - 1];
+    const excluded = noteBlockIds(pages.flatMap(page => page.data?.blocks ?? []),view.documentNotes);
+    const continuations = readingContinuations(pages,excluded);
     return <div
       ref={this.root}
       data-reading-pages=""
@@ -53,8 +58,9 @@ class StreamPages extends Component<StreamPagesProps> {
       }, 0)}
     >
       {pages.map(({number, data, error}) => data
-        ? <HtmlView key={number} {...view} page={number} blocks={data.blocks} tables={data.tables} continuous hit={hit?.page === number ? hit : undefined}
-          preview={preview?.ranges.some(range=>range.page===number)?preview:undefined} flash={anchorPage === number ? flash : undefined}/>
+        ? <HtmlView key={number} {...view} page={number} blocks={data.blocks} tables={data.tables} continuous
+          publicationSource={data.reading_source}
+          continuation={continuations.get(number)} hit={hit} preview={preview} flash={flash}/>
         : <section key={number} className="html-content article-view continuous-page stream-page-wait" data-reading-page={number}>
           {error ? <>
             <p className="article-page-number">第 {number} 页暂不可读</p>

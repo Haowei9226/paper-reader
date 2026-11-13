@@ -11,7 +11,7 @@ import httpx
 from .academic import (SEGMENT_GUIDANCE, citation_counts, context_excerpt, joined, page_joined, retain_bilingual_terms,
                        source_with_offsets, translation_blocks, translation_style)
 from .formulas import KEEP_NOTATION, TOKEN, keeps_notation, mask_notation, restore_notation
-from .layout import map_table_blocks, table_cell_translations
+from .layout import classify_page, map_table_blocks, table_cell_translations
 from .paper_chat import PAPER_ASSISTANT, conversation_for, fit_text, rank_passages, select_evidence
 from .pdf import geometry, length, slice_text
 from .reading import classify_reading_blocks, continues_sentence, readable_text
@@ -695,7 +695,10 @@ def _translation_job(store: Store, job, client):
                     stale.update(bid for bid, previous, *_ in parts if previous)
     explicit = set(payload.get("block_ids", []))
     rows = [b for b in blocks if (b["id"] in explicit if explicit else b["reading_role"] != "extra")
-            and b["reading_role"] != "formula" and (b["reading_role"] != "table" or b.get("table_spans"))
+            and b["kind"] != "legacy"
+            and b["reading_role"] not in ("formula", "embedded")
+            and b.get("reading_element") not in ("author", "affiliation", "header", "footer", "page_number", "line_number", "copyright", "publication", "keywords")
+            and (b["reading_role"] != "table" or b.get("table_spans"))
             and readable_text(b["text"]).strip()]
     if payload.get("page_start"):
         rows = [b for b in rows if payload["page_start"] <= b["page"] <= payload.get("page_end", b["page"])]
@@ -932,15 +935,17 @@ def reading_job(store: Store, job):
     payload = job["payload"]
     with store.connect() as db:
         paper = store.paper(job["paper_id"], db)
-        source = db.execute("""SELECT b.id,b.text,b.kind,b.page,b.section,b.bbox,b.geometry,p.height
+        source = db.execute("""SELECT b.*,p.height,p.width,p.ocr_job_id
             FROM blocks b JOIN pages p ON p.paper_id=b.paper_id AND p.number=b.page
-            WHERE b.paper_id=? AND b.kind!='image' ORDER BY b.page,b.position""", (job["paper_id"],))
+            WHERE b.paper_id=? ORDER BY b.page,b.position""", (job["paper_id"],))
         rows = []
         for number, group in groupby(source, key=lambda block: block["page"]):
             blocks = [{**block, "bbox": json.loads(block["bbox"])} for block in group]
-            classify_reading_blocks(blocks, paper, number, blocks[0]["height"])
+            classify_page(store.original(paper["id"]), paper, number, blocks[0]["height"], blocks,
+                          width=blocks[0]["width"], detect=False, ocr=bool(blocks[0]["ocr_job_id"]))
             rows.extend({key: block[key] for key in ("id", "text", "page", "section")}
-                        for block in blocks)
+                        for block in blocks if block["kind"] not in ("image", "legacy") and
+                        (block["reading_role"] not in ("extra", "embedded") or block["id"] in payload.get("block_ids", [])))
     if payload.get("block_ids"):
         rows = [r for r in rows if r["id"] in payload["block_ids"]]
     if payload.get("page_start"):

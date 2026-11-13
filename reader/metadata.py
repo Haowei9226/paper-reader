@@ -49,6 +49,9 @@ AUTHOR_ROLE = re.compile(r",\s*(?:ph\.?\s*d\.?|m\.?\s*d\.?|(?:doctoral|graduate|
 AFTER_BYLINE = re.compile(r"^(?:abstract\b|摘\s*要|(?:1[.、\s]+)?(?:introduction\b|引言)|keywords\b|ccs concepts\b)", re.I)
 NAME_TOKEN = re.compile(r"[^\W\d_]+(?:[-’'][^\W\d_]+)*\.?", re.UNICODE)
 NAME_PARTICLES = {"al", "bin", "da", "de", "del", "der", "di", "dos", "la", "le", "van", "von"}
+# Recognizable UTF-8 punctuation bytes interpreted as PDFDocEncoding/Windows
+# text. This is detection only: replacement requires an independent printed copy.
+BROKEN_METADATA = re.compile(r"\ufffd|\u00e2(?:\u2022[\ufb01\ufb02]|\u20ac[\u02dc\u2122\u0153\u201c\u201d\u00a6\u2014\u2013])")
 
 
 def plain(value, limit=2000):
@@ -233,6 +236,38 @@ def xmp_fields(doc):
     return values
 
 
+def visible_publication_source(doc, source):
+    """Return a printed source only for a corrupt field with exact textual support."""
+    if not BROKEN_METADATA.search(source or ""):
+        return ""
+    # Remove only the recognized bad punctuation sequence from the comparison
+    # key. Every remaining letter and number must occur in the printed copy.
+    expected = identity(BROKEN_METADATA.sub("", source))
+    if len(expected) < 24:
+        return ""
+    from .pdf import extract_block, recover_pdf_glyphs
+
+    candidates = set()
+    for page_number in range(min(3, len(doc))):
+        page = doc[page_number]
+        blocks = page.get_text("rawdict", flags=pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES)["blocks"]
+        recover_pdf_glyphs(page, blocks)
+        text = "\n".join(extract_block(block, page)[0] for block in blocks if block.get("type") == 0)
+        key, offsets = [], []
+        for index, char in enumerate(text):
+            folded = identity(char)
+            key.extend(folded)
+            offsets.extend([index] * len(folded))
+        key = "".join(key)
+        start = 0
+        while (found := key.find(expected, start)) >= 0:
+            value = plain(text[offsets[found]:offsets[found + len(expected) - 1] + 1])
+            if value and not BROKEN_METADATA.search(value):
+                candidates.add(value)
+            start = found + 1
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def pdf_clues(doc):
     from .pdf import front_lines, inferred_title
 
@@ -269,7 +304,8 @@ def pdf_clues(doc):
     if item_type := TYPE_MAP.get(identity(xmp.get("type", ""))):
         fields["item_type"] = item_type
     if xmp.get("publicationname"):
-        fields["source"] = xmp["publicationname"][:2000]
+        source = xmp["publicationname"][:2000]
+        fields["source"] = visible_publication_source(doc, source) or source
     abstract = re.search(
         r"(?ims)^[ \t]*(?:Abstract\b|摘\s*要)[ \t]*[:：.—-]?\s*(.+?)(?=^[ \t]*(?:Keywords?\b|Index Terms\b|关键词|Abstract\b|(?:\d+[. \t]+)?Introduction\b|[一1][、. \t]+引言|CCS CONCEPTS\b|ACM Reference Format\b)|\Z)",
         front,
